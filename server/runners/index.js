@@ -1,6 +1,9 @@
 // Runner manager: one live process per agent, status bookkeeping, push on completion,
 // and the automatic "triage → plan (Fable) → execute (Sonnet)" pipeline.
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { DATA_DIR } from '../paths.js';
 import { AgentSessions, Agents, Messages, Workspaces } from '../db.js';
 import { emit } from '../bus.js';
 import { sendPush } from '../push.js';
@@ -90,10 +93,13 @@ function runTurn(agentId, text, cfg, opts = {}) {
       AgentSessions.upsert(agentId, provider, agent.session_id);
       savedSession = agent.session_id;
     }
+    // A one-off run (the planner) starts a fresh session and must not become the agent's session.
+    if (opts.fresh) savedSession = null;
     const runtimeModel = Object.hasOwn(opts, 'model') ? opts.model : provider === 'codex' ? null : agent.model;
     const runtimeAgent = { ...agent, kind: provider, session_id: savedSession, model: runtimeModel };
     let result = null;
     let resolvedModel = null;
+    let usageRow = null;
     const hooks = {
       onLog: (line) => console.log(`[agent ${agentId}] ${line}`),
       onSession: (sessionId, info) => {
@@ -101,7 +107,7 @@ function runTurn(agentId, text, cfg, opts = {}) {
           resolvedModel = info.model;
           recordResolvedModel(agentId, opts.stage, info.model);
         }
-        if (!sessionId) return;
+        if (!sessionId || opts.fresh) return;
         AgentSessions.upsert(agentId, provider, sessionId);
         const current = Agents.get(agentId);
         if (current?.kind === provider && sessionId !== current.session_id) update(agentId, { session_id: sessionId });
@@ -114,16 +120,27 @@ function runTurn(agentId, text, cfg, opts = {}) {
       onResult: (r) => {
         result = { ...r, provider, ...(opts.phase ? { phase: opts.phase } : {}) };
         const usage = provider === 'codex' ? (r.usage ? normalizeCodexUsage(r.usage) : null) : r.usage;
-        if (usage) {
-          pushUsage(agentId, {
-            stage: opts.stage || 'manual',
-            phase: opts.phase || null,
-            provider,
-            model: r.model || resolvedModel || opts.model || null,
-            ...usage,
-          });
+        const hasTokens = usage && (usage.input || usage.output || usage.cacheRead || usage.cacheWrite);
+        if (hasTokens) {
+          if (usageRow) {
+            // Same process reported again: tokens are per segment, cost is the running total.
+            usageRow.input += usage.input || 0;
+            usageRow.output += usage.output || 0;
+            usageRow.cacheRead += usage.cacheRead || 0;
+            usageRow.cacheWrite += usage.cacheWrite || 0;
+            if (usage.cost != null) usageRow.cost = usage.cost;
+          } else {
+            usageRow = {
+              stage: opts.stage || 'manual',
+              phase: opts.phase || null,
+              provider,
+              model: resolvedModel || r.model || opts.model || null,   // init event names the main model
+              ...usage,
+            };
+            pushUsage(agentId, usageRow);
+          }
         }
-        if (r.session_id && Agents.get(agentId)) {
+        if (r.session_id && !opts.fresh && Agents.get(agentId)) {
           AgentSessions.upsert(agentId, provider, r.session_id);
           if (Agents.get(agentId)?.kind === provider) Agents.update(agentId, { session_id: r.session_id });
         }
@@ -165,8 +182,9 @@ Respond only with JSON matching the schema. "reason" is one short Korean sentenc
 
 Request:
 ${text}`;
-  const r = await runClaudeOnce({
-    cwd: workspace.path, prompt, model: agent.triage_model || 'haiku', schema: TRIAGE_SCHEMA, cfg,
+  void workspace; // triage only needs the request text; running it in the project folder would load
+  const r = await runClaudeOnce({ // that project's CLAUDE.md/AGENTS.md into every triage call (tens of k tokens).
+    cwd: TRIAGE_DIR, prompt, model: agent.triage_model || 'haiku', schema: TRIAGE_SCHEMA, cfg,
     onModel: (id) => recordResolvedModel(agent.id, 'triage', id),
     onUsage: (u, id) => pushUsage(agent.id, { stage: 'triage', phase: null, provider: 'claude', model: id || agent.triage_model, ...u }),
   });
@@ -174,7 +192,23 @@ ${text}`;
   return r;
 }
 
+const TRIAGE_DIR = path.join(DATA_DIR, 'triage');
+fs.mkdirSync(TRIAGE_DIR, { recursive: true });
+
 const EXEC_PROMPT = '위에서 세운 계획을 그대로 실행해. 계획에 없는 작업은 하지 말고, 끝나면 무엇을 바꿨는지 한국어로 짧게 요약해.';
+
+/** The planner runs in its own short session: the request plus a compact summary of recent talk. */
+function plannerPrompt(agentId, text) {
+  const recent = compactConversation(Messages.forAgent(agentId, 30), 5000);
+  return `${recent ? `[최근 대화 요약]\n${recent}\n\n` : ''}[요청]\n${text}\n\n위 요청을 실행하기 위한 계획만 세워라. 파일을 수정하지 말고, 계획이 완성되면 ExitPlanMode로 제출해라.`;
+}
+/** The executor resumes the main session but never saw the planner's session, so the plan rides along. */
+function execPrompt(agentId, sinceMessageId) {
+  const plan = Messages.after(agentId, sinceMessageId).filter((m) => m.role === 'plan').at(-1)
+    || Messages.forAgent(agentId, 50).filter((m) => m.role === 'plan').at(-1);
+  if (!plan) return EXEC_PROMPT;
+  return `아래 계획을 그대로 실행해. 계획에 없는 작업은 하지 말고, 끝나면 무엇을 바꿨는지 한국어로 짧게 요약해.\n\n[계획]\n${plan.content}`;
+}
 
 export function isUsageLimitError(result) {
   if (!result || result.ok) return false;
@@ -226,14 +260,14 @@ async function runProviderWork(agentId, text, cfg, { kind, phase, autoRoute = fa
     planPhase.add(agentId);
     let planRun;
     try {
-      planRun = await runTurn(agentId, text, cfg, { kind, phase, stage: 'plan', model: agent.plan_model, effort: efforts.plan, permissionMode: 'plan' });
+      planRun = await runTurn(agentId, plannerPrompt(agentId, text), cfg, { kind, phase, stage: 'plan', fresh: true, model: agent.plan_model, effort: efforts.plan, permissionMode: 'plan' });
     } finally {
       planPhase.delete(agentId);
     }
     const hasPlan = Messages.after(agentId, planStartMessageId).some((m) => m.role === 'plan');
     if (!planRun || (!planRun.ok && !hasPlan) || planRun.crashed) return planRun;
     note(agentId, `${STAGE_LABEL[phase]} · 계획 완료 → ${withEffort(agent.exec_model, efforts.exec)} 실행`);
-    return runTurn(agentId, EXEC_PROMPT, cfg, { kind, phase, stage: 'exec', model: agent.exec_model, effort: efforts.exec });
+    return runTurn(agentId, execPrompt(agentId, planStartMessageId), cfg, { kind, phase, stage: 'exec', model: agent.exec_model, effort: efforts.exec });
   }
 
   if (kind === 'claude') {
@@ -352,7 +386,7 @@ async function runPipeline(agentId, text, cfg, flow = { allowFailover: true }) {
   planPhase.add(agentId);
   let planRun;
   try {
-    planRun = await runTurn(agentId, text, cfg, { stage: 'plan', model: agent.plan_model, effort: efforts.plan, permissionMode: 'plan' });
+    planRun = await runTurn(agentId, plannerPrompt(agentId, text), cfg, { stage: 'plan', fresh: true, model: agent.plan_model, effort: efforts.plan, permissionMode: 'plan' });
   } finally {
     planPhase.delete(agentId);
   }
@@ -370,7 +404,7 @@ async function runPipeline(agentId, text, cfg, flow = { allowFailover: true }) {
     return;
   }
   note(agentId, `계획 완료 → ${withEffort(agent.exec_model, efforts.exec)} 실행`);
-  const execRun = await runTurn(agentId, EXEC_PROMPT, cfg, { stage: 'exec', model: agent.exec_model, effort: efforts.exec });
+  const execRun = await runTurn(agentId, execPrompt(agentId, planStartMessageId), cfg, { stage: 'exec', model: agent.exec_model, effort: efforts.exec });
   return completeOrFailover(agentId, execRun, text, cfg, flow.allowFailover !== false);
 }
 
@@ -427,8 +461,9 @@ export function executePlan(agentId, cfg) {
   const updated = update(agentId, { status: 'working', pending_plan: 0, collab_stage: null });
   const efforts = stageEfforts(agent);
   note(agentId, `계획 승인 → ${withEffort(agent.exec_model, efforts.exec)} 실행`);
-  runTurn(agentId, EXEC_PROMPT, cfg, { stage: 'exec', model: agent.exec_model, effort: efforts.exec })
-    .then((r) => completeOrFailover(agentId, r, EXEC_PROMPT, cfg, true))
+  const prompt = execPrompt(agentId, 0);
+  runTurn(agentId, prompt, cfg, { stage: 'exec', model: agent.exec_model, effort: efforts.exec })
+    .then((r) => completeOrFailover(agentId, r, prompt, cfg, true))
     .catch((e) => finish(agentId, { ok: false, text: e.message }));
   return updated;
 }

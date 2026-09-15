@@ -151,6 +151,15 @@
 - 예전 로그온 작업 `AgentRemote`가 옛 경로(`remote-project`)를 가리켜 실행이 실패하고 있었다(결과 코드 0x8007010B). `scripts/register-autostart.ps1`이 옛 작업을 지우고 `leebeegle_SmartAgent` 이름으로 새 경로에 다시 등록하도록 바꿨고, `scripts/unregister-autostart.ps1`을 추가했다.
 - 지금 떠 있는 서버는 스케줄러가 띄운 것이라 Claude 세션이 끝나도 유지된다. Claude 세션에서 서버를 직접 띄우면 세션 종료·폴더 이동 때 같이 죽으니, 앞으로는 `Start-ScheduledTask -TaskName leebeegle_SmartAgent`로 켜고, 코드 변경 후 재시작은 포트 3000 프로세스를 종료한 뒤 같은 명령을 쓰면 된다.
 
+## 추가 완료 (2026-09-15, 토큰 비용 구조 개선)
+
+- 왜 복잡한 작업이 Fable 단독보다 비쌌나: 계획 단계가 `--resume`으로 메인 세션 전체를 이어받는데, 프롬프트 캐시는 모델별이라 Sonnet이 쌓아 둔 수십만 토큰 컨텍스트를 Fable이 자기 캐시에 다시 써야 했다(실측 cacheWrite 205k, Fable 쓰기 단가라 $4.5). 그 뒤 Sonnet 실행이 또 전체를 읽는다.
+- 해결: 계획 단계를 **새 세션**(`runTurn` opts `fresh: true`, `--resume` 없음)에서 돌린다. 입력은 `plannerPrompt()` = 최근 대화 요약(`compactConversation` 5000자) + 요청. 계획은 기존처럼 ExitPlanMode 가로채기로 `plan` 메시지에 저장되고, 실행 단계는 메인 세션을 이어받되 `execPrompt()`가 그 계획 본문을 프롬프트에 실어 준다(승인 후 실행 경로도 동일). fresh 런은 세션 id를 에이전트에 저장하지 않는다.
+- 실측(같은 급 복잡 작업, agent 6): plan cacheWrite 205k → 22k, 합계 Fable 단독 대비 -40% → +41% 절약.
+- 판단 단계를 프로젝트 폴더 밖(`data/triage`)에서 실행한다. 프로젝트 폴더에서 돌리면 그 프로젝트의 CLAUDE.md/AGENTS.md가 매번 로드된다(ktech_silrok에서 triage cacheWrite 80k = $0.16/회 → 약 7k).
+- 집계 중복 수정: Claude가 한 프로세스에서 `result` 이벤트를 여러 번 내면(토큰은 구간별, cost는 누적) 행이 5개씩 생기던 것을 한 행으로 합산(토큰 합, cost는 마지막 값), 0토큰 행은 버린다. 모델 라벨은 init 이벤트의 메인 모델을 우선하고 `modelUsage`에서는 비용이 가장 큰 키를 고른다(서브에이전트 Haiku가 라벨을 가로채던 문제).
+- 남은 절약 포인트: 실행 단계가 매번 메인 세션 전체(1M 토큰 캐시 읽기)를 읽는다. 대화가 길어질수록 커지므로 `대화 초기화`(reset_session)를 주기적으로 쓰거나 자동 요약 기준을 두는 것이 다음 과제.
+
 ## 변경한 파일
 
 - `server/db.js`

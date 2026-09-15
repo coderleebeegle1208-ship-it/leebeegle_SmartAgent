@@ -197,7 +197,9 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
         cost: ev.total_cost_usd,
         denials: ev.permission_denials,
         usage: normalizeClaudeUsage(ev),
-        model: Object.keys(ev.modelUsage || {})[0] || null,
+        // modelUsage also lists subagent models (Explore helpers run on Haiku); the main model is
+        // the one that spent the most, not whichever key happens to come first.
+        model: Object.entries(ev.modelUsage || {}).sort((a, b) => (b[1]?.costUSD || 0) - (a[1]?.costUSD || 0))[0]?.[0] || null,
       });
     }
   }
