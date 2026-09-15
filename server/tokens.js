@@ -94,9 +94,17 @@ function fmtUsd(n) {
 }
 
 /** One-line summary for the collapsed card, e.g. "토큰 32.4k · 환산 $0.19 · Fable 단독 대비 61% 절약". */
+/**
+ * Headline the way the desktop app counts: "새 토큰" is what the model actually processed fresh
+ * (input + output + cache writes); the re-read conversation (cache reads) is shown separately
+ * because it is ~10x cheaper per token and otherwise dwarfs everything.
+ */
 export function usageHeadline(summary) {
-  const parts = [`토큰 ${fmtTokens(summary.total.tokens)}`];
-  const cost = fmtUsd(summary.total.cost);
+  const t = summary.total;
+  const fresh = (t.input || 0) + (t.output || 0) + (t.cacheWrite || 0);
+  const parts = [`새 토큰 ${fmtTokens(fresh)}`];
+  if (t.cacheRead) parts.push(`다시 읽기 ${fmtTokens(t.cacheRead)}`);
+  const cost = fmtUsd(t.cost);
   if (cost) parts.push(`환산 ${cost}`);
   if (summary.savedPct != null && summary.savedPct > 0) {
     parts.push(`${modelLabel(summary.baseline.model)} 단독 대비 ${summary.savedPct}% 절약`);

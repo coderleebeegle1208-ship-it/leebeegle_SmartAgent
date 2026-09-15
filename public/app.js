@@ -1044,7 +1044,7 @@
           const cost = fmtUsd(s.cost);
           return `<div class="usage-row"><b>${esc(label)}</b><span>${esc(tok)}</span><i>${cost ? esc(cost) : '—'}</i></div>`;
         }).join('');
-        const note = '구독 요금제라 실제 청구는 아니고 API 요금으로 환산한 값입니다.'
+        const note = '"새 토큰"은 이번에 새로 처리한 양(데스크톱 앱이 보여주는 숫자와 같은 기준), "다시 읽기"는 이전 대화를 기억에서 다시 읽은 양입니다. 다시 읽기는 토큰당 비용이 약 10분의 1이지만 대화가 길수록 커지므로, 대화 정리가 이 값을 줄입니다. 구독 요금제라 실제 청구는 아니고 API 요금으로 환산한 값입니다.'
           + (u.baseline ? ` 절약률은 모든 단계를 ${esc(modelLabel(u.baseline.model))}로 돌렸을 때와 비교한 추정치입니다.` : '');
         el.innerHTML = `<details class="usage-card"><summary>${esc(m.content)}</summary><div class="usage-rows">${rows}<div class="usage-note">${note}</div></div></details>`;
       }
