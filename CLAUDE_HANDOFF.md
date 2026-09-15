@@ -183,6 +183,13 @@
 - 트레이 앱(`C:\Program Files\Tailscale	ailscale-ipn.exe`)을 띄우자 10초 안에 정상 상태로 돌아왔고 `tailscale serve` 설정(/ → 127.0.0.1:3000)도 그대로 살아 있었다. 다음에 같은 증상이면 먼저 트레이 앱 실행, 그래도 안 되면 노트북 재부팅.
 - 구분법: 502 = 앱 서버 죽음(`restart-server.ps1`), "연결할 수 없음" = Tailscale 터널 문제.
 
+## 추가 완료 (2026-09-16, 데스크톱식 진행 표시)
+
+- 지침(`style.js`): "중계 문장 최소화"를 뒤집어 단계가 바뀔 때 한국어 한 줄로 먼저 말하게 했고, 영어 문장 금지를 명시했다(폰 에이전트가 "Now the mode-chip opener..."처럼 영어로 중계하던 문제).
+- 활동 요약 줄을 데스크톱 문구로: `생성됨 파일 N개, 실행됨 명령 N개 (K개 실패), 편집됨 파일 N개, 사용한 도구 N개 +A -R`. `claude.js`의 `toolStats()`가 Write/Edit/NotebookEdit 메시지 meta에 `file/added/removed`(줄 수)를 넣고, 앱이 그룹 dataset에 파일 경로 집합과 줄 수를 누적한다. +는 초록(`--ok-ink`), -는 빨강.
+- 진행 바 `#progress`(composer 안, 승인 카드 아래): 스피너 + 현재 단계("난이도 판단 중" / "계획 세우는 중" / "Sonnet 최신 실행 중" / "승인을 기다리는 중") + 마지막 사용자 메시지 기준 경과 시간(1초 갱신). `renderAgentHead → updateProgress`가 running 여부로 켜고 끈다.
+- 검증(agent 6): README 편집 + CHANGELOG 생성 작업에서 진행 바 "Sonnet 최신 실행 중 · 14초", 완료 후 요약 "생성됨 파일 1개, 편집됨 파일 1개, 사용한 도구 1개 +20 -5", 사용량 "새 토큰 4.2k · 다시 읽기 163.1k". 테스트 23/23.
+
 ## 변경한 파일
 
 - `server/db.js`

@@ -102,6 +102,16 @@ export function runClaudeOnceText({ cwd, prompt, model = 'haiku', cfg, timeoutMs
   });
 }
 
+/** Extra fields the phone folds into its "생성됨 · 편집됨 +N -M" summary line. */
+function toolStats(name, input) {
+  if (!input) return {};
+  const lines = (s) => (s ? String(s).split('\n').length : 0);
+  if (name === 'Write') return { file: input.file_path || '', added: lines(input.content), removed: 0 };
+  if (name === 'Edit') return { file: input.file_path || '', added: lines(input.new_string), removed: lines(input.old_string) };
+  if (name === 'NotebookEdit') return { file: input.notebook_path || '', added: lines(input.new_source), removed: 0 };
+  return {};
+}
+
 function summarizeToolUse(name, input) {
   if (!input) return name;
   if (name === 'Bash') return `$ ${input.command || ''}`;
@@ -196,7 +206,7 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
       if (ev.parent_tool_use_id) return; // subagent chatter: skip
       for (const block of ev.message.content) {
         if (block.type === 'text' && block.text?.trim()) hooks.onMessage?.('assistant', block.text);
-        else if (block.type === 'tool_use') hooks.onMessage?.('tool', summarizeToolUse(block.name, block.input), { tool: block.name, id: block.id });
+        else if (block.type === 'tool_use') hooks.onMessage?.('tool', summarizeToolUse(block.name, block.input), { tool: block.name, id: block.id, ...toolStats(block.name, block.input) });
       }
       return;
     }

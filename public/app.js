@@ -731,6 +731,7 @@
       </div>
       <div class="planbar" id="planbar" hidden><span>계획이 준비되었습니다.</span><button class="btn primary" id="exec-plan">이 계획대로 실행</button></div>
       <div id="approvals"></div>
+      <div class="progress" id="progress" hidden><span class="spin" aria-hidden="true"></span><span id="progress-text">작업 중</span><span id="progress-time" class="mono"></span></div>
       <div class="menu-popover" id="mode-popover" role="menu" hidden>
         <div class="menu-head" id="mode-title"></div>
         <div id="mode-items"></div>
@@ -950,6 +951,40 @@
     if (y !== null) window.scrollTo(0, y);
     else window.scrollTo(0, document.body.scrollHeight);
   }
+  // "지금 뭘 하고 있나 · 얼마나 걸리고 있나" strip above the input while a run is live.
+  let progressTimer = null;
+  function progressStage(a) {
+    if (a.status === 'needs_attention') return '승인을 기다리는 중';
+    const msgs = state.detail?.messages || [];
+    for (let i = msgs.length - 1; i >= 0; i -= 1) {
+      const m = msgs[i];
+      if (m.role === 'user') break;
+      if (m.role === 'system') {
+        const c = m.content;
+        if (/판단 중/.test(c)) return '난이도 판단 중';
+        if (/계획 ·|계획 완료|계획$/.test(c) && !/실행/.test(c)) return '계획 세우는 중';
+        if (/실행/.test(c)) { const model = (c.match(/→ ([^·(]+)/)?.[1] || '').trim(); return model ? `${model} 실행 중` : '실행 중'; }
+      }
+    }
+    return a.collab_stage ? collabStageLabel[a.collab_stage] : '작업 중';
+  }
+  function updateProgress(a, running) {
+    const bar = $('#progress');
+    if (!bar) return;
+    if (!running) { bar.hidden = true; clearInterval(progressTimer); progressTimer = null; syncComposerSpace(); return; }
+    const msgs = state.detail?.messages || [];
+    const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
+    const startedAt = lastUser ? lastUser.created_at : a.updated_at;
+    const tick = () => {
+      const s = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+      $('#progress-time').textContent = s >= 60 ? `${Math.floor(s / 60)}분 ${s % 60}초` : `${s}초`;
+      $('#progress-text').textContent = progressStage(a);
+    };
+    tick();
+    if (bar.hidden) { bar.hidden = false; syncComposerSpace(); }
+    clearInterval(progressTimer);
+    progressTimer = setInterval(tick, 1000);
+  }
   function renderAgentHead() {
     const a = state.detail?.agent;
     if (!a) return;
@@ -970,6 +1005,7 @@
     if (send) send.hidden = running;
     if (stop) stop.hidden = !running;
     if (planbar) planbar.hidden = !pendingPlan;
+    updateProgress(a, running);
   }
   // Tool calls and their results are folded into one "activity" group per burst, like the desktop
   // apps: a one-line summary (실행된 명령 N개, 사용한 도구 M개) that expands to the raw details.
@@ -978,13 +1014,22 @@
     const last = box.lastElementChild;
     return last?.classList.contains('activity') ? last : null;
   }
+  // Same wording as the desktop app: 생성됨 파일 N개, 실행됨 명령 N개 (K개 실패), 편집됨 파일 N개 +A -R
   function activitySummary(group) {
-    const c = group.dataset.commands | 0, t = group.dataset.tools | 0, f = group.dataset.failed | 0;
+    const d = group.dataset;
+    const c = d.commands | 0, t = d.tools | 0, f = d.failed | 0;
+    const created = d.created ? d.created.split('|').filter(Boolean).length : 0;
+    const edited = d.edited ? d.edited.split('|').filter(Boolean).length : 0;
+    const added = d.added | 0, removed = d.removed | 0;
     const parts = [];
-    if (c) parts.push(`실행된 명령 ${c}개`);
+    if (created) parts.push(`생성됨 파일 ${created}개`);
+    if (c) parts.push(`실행됨 명령 ${c}개${f ? ` <em>(${f}개 실패)</em>` : ''}`);
+    if (edited) parts.push(`편집됨 파일 ${edited}개`);
     if (t) parts.push(`사용한 도구 ${t}개`);
-    if (!parts.length) parts.push('작업 기록');
-    return parts.join(', ') + (f ? ` <em>(${f}개 실패)</em>` : '');
+    if (!parts.length) parts.push('작업 기록' + (f ? ` <em>(${f}개 실패)</em>` : ''));
+    else if (f && !c) parts[parts.length - 1] += ` <em>(${f}개 실패)</em>`;
+    const diff = (added || removed) ? ` <span class="diffstat"><ins>+${added}</ins> <del>-${removed}</del></span>` : '';
+    return parts.join(', ') + diff;
   }
   function refreshActivity(group) {
     group.querySelector('.activity-title').innerHTML = activitySummary(group);
@@ -1068,9 +1113,14 @@
       const group = ensureActivity(box);
       group.querySelector('.activity-body').appendChild(el);
       if (m.role === 'tool') {
-        const key = meta.tool === 'Bash' ? 'commands' : 'tools';
-        group.dataset[key] = (group.dataset[key] | 0) + 1;
-        group.dataset.live = shortPath(m.content).replace(/\s+/g, ' ').slice(0, 90);
+        const d = group.dataset;
+        if (meta.tool === 'Bash') d.commands = (d.commands | 0) + 1;
+        else if (meta.tool === 'Write' && meta.file) { if (!(d.created || '').includes(`|${meta.file}|`)) d.created = `${d.created || '|'}${meta.file}|`; }
+        else if ((meta.tool === 'Edit' || meta.tool === 'NotebookEdit') && meta.file) { if (!(d.edited || '').includes(`|${meta.file}|`)) d.edited = `${d.edited || '|'}${meta.file}|`; }
+        else d.tools = (d.tools | 0) + 1;
+        if (meta.added) d.added = (d.added | 0) + meta.added;
+        if (meta.removed) d.removed = (d.removed | 0) + meta.removed;
+        d.live = shortPath(m.content).replace(/\s+/g, ' ').slice(0, 90);
       } else if (m.role === 'tool_result' && meta.is_error) {
         group.dataset.failed = (group.dataset.failed | 0) + 1;
       }
