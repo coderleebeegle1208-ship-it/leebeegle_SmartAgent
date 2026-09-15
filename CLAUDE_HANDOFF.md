@@ -177,6 +177,12 @@
 - 검증: `/api/restart`로 PID 11764 → 18956, 에이전트 도구 호출로 18956 → 26008, 둘 다 10초 안에 복귀. 에이전트는 "재시작 걸어뒀습니다"만 보고하고 끝냈다.
 - 함께 커밋: 폰 에이전트가 만들어 둔 사진·동영상 첨부와 링크 읽기(`server/uploads.js`, 테스트 23개 통과 상태).
 
+## 장애 메모 (2026-09-16, "사이트에 연결할 수 없음")
+
+- 로컬 서버는 200인데 폰(https://leebeegle.tailb35555.ts.net)이 안 열렸다. 원인은 Tailscale 백엔드가 `NoState`("Tailscale is starting. Please wait.")에 몇 분째 멈춰 있던 것. 서비스는 Running, `tailscale up`도 무반응, 서비스 재시작은 관리자 권한이 필요해 불가.
+- 트레이 앱(`C:\Program Files\Tailscale	ailscale-ipn.exe`)을 띄우자 10초 안에 정상 상태로 돌아왔고 `tailscale serve` 설정(/ → 127.0.0.1:3000)도 그대로 살아 있었다. 다음에 같은 증상이면 먼저 트레이 앱 실행, 그래도 안 되면 노트북 재부팅.
+- 구분법: 502 = 앱 서버 죽음(`restart-server.ps1`), "연결할 수 없음" = Tailscale 터널 문제.
+
 ## 변경한 파일
 
 - `server/db.js`
