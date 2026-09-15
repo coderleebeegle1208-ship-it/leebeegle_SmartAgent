@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#FFFFFF">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <title>Agent Remote</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+KR:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar" id="topbar">
+    <div class="topbar-inner">
+      <button class="icon-btn" id="btn-back" hidden aria-label="뒤로"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button>
+      <div class="brand">
+        <span class="dot" id="conn-dot"></span>
+        <span id="topbar-title">Agent Remote</span>
+      </div>
+      <button class="icon-btn" id="btn-refresh" aria-label="새로고침"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></button>
+      <button class="icon-btn" id="btn-settings" aria-label="설정"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2.5"/><circle cx="10" cy="17" r="2.5"/></svg></button>
+    </div>
+  </header>
+
+  <main id="view"></main>
+
+  <button class="fab" id="fab" aria-label="워크스페이스 추가"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
+
+  <!-- login -->
+  <dialog id="dlg-login">
+    <form method="dialog" class="form">
+      <h2>접속 토큰</h2>
+      <p class="muted">PC에서 서버를 시작할 때 터미널에 출력된 Access token을 입력하세요.</p>
+      <input id="login-token" type="password" placeholder="token" autocomplete="off" required>
+      <div class="row-flex end"><button class="btn primary" id="login-submit">확인</button></div>
+      <p class="error" id="login-error" hidden></p>
+    </form>
+  </dialog>
+
+  <!-- add workspace -->
+  <dialog id="dlg-ws">
+    <form method="dialog" class="form" id="form-ws">
+      <h2>워크스페이스 추가</h2>
+      <label>이름 <input id="ws-name" placeholder="비우면 폴더 이름"></label>
+      <label>폴더 경로 <input id="ws-path" placeholder="C:\Users\...\project" required></label>
+      <div class="browser" id="ws-browser"></div>
+      <div class="row-flex end">
+        <button class="btn" type="button" data-close>취소</button>
+        <button class="btn primary" id="ws-submit">추가</button>
+      </div>
+      <p class="error" id="ws-error" hidden></p>
+    </form>
+  </dialog>
+
+  <!-- github repository -->
+  <dialog id="dlg-repo">
+    <form method="dialog" class="form" id="form-repo">
+      <h2 id="repo-title">GitHub 저장소</h2>
+      <div id="repo-current" class="repo-card" hidden>
+        <div class="repo-card-name" id="repo-name"></div>
+        <div class="repo-card-url" id="repo-url-view"></div>
+        <div class="repo-card-actions">
+          <button class="btn" type="button" id="repo-copy">주소 복사</button>
+          <button class="btn" type="button" id="repo-open">GitHub에서 열기</button>
+        </div>
+      </div>
+      <p class="hint" id="repo-hint"></p>
+      <details class="repo-change" id="repo-change">
+        <summary>주소 바꾸기</summary>
+        <label>새 저장소 주소 <input id="repo-url" placeholder="https://github.com/이름/저장소" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+        <p class="hint">GitHub 저장소 페이지 주소를 그대로 붙여넣으면 됩니다.</p>
+      </details>
+      <div class="row-flex end">
+        <button class="btn" type="button" data-close>닫기</button>
+        <button class="btn primary" id="repo-submit">저장</button>
+      </div>
+      <p class="error" id="repo-error" hidden></p>
+    </form>
+  </dialog>
+
+  <!-- add agent -->
+  <dialog id="dlg-agent">
+    <form method="dialog" class="form" id="form-agent">
+      <h2>에이전트 추가</h2>
+      <label>시작 모델
+        <select id="agent-kind">
+          <option value="claude">Claude Code</option>
+          <option value="codex">Codex</option>
+        </select>
+      </label>
+      <label>이름 <input id="agent-name" placeholder="예: 리팩터링"></label>
+      <label>권한
+        <select id="agent-perm">
+          <option value="ask">매번 폰에서 승인</option>
+          <option value="acceptEdits">파일 수정은 자동, 명령은 승인</option>
+          <option value="auto">자동 (분류기 판단)</option>
+        </select>
+      </label>
+      <div id="claude-opts">
+        <label>실행 방식
+          <select id="agent-pipeline">
+            <option value="auto">교차 모델 · 계획은 Fable, 실행은 Sonnet (한도 절약)</option>
+            <option value="manual">단일 모델 · 모델 하나를 직접 지정</option>
+          </select>
+        </label>
+        <div class="row-flex" id="auto-opts">
+          <label style="flex:1">계획 모델
+            <select id="agent-plan-model" data-model-stage="plan"></select>
+          </label>
+          <label style="flex:1">실행 모델
+            <select id="agent-exec-model" data-model-stage="exec"></select>
+          </label>
+        </div>
+        <div class="row-flex" id="manual-opts" hidden>
+          <label style="flex:1">모델
+            <select id="agent-model" data-model-stage="manual" data-model-blank="기본 (터미널 설정값)"></select>
+          </label>
+        </div>
+        <label>강도
+          <select id="agent-effort">
+            <option value="">기본</option>
+            <option value="low">낮음</option>
+            <option value="medium">중간</option>
+            <option value="high">높음</option>
+            <option value="xhigh">매우 높음</option>
+            <option value="max">최대</option>
+          </select>
+        </label>
+      </div>
+      <label class="check"><input type="checkbox" id="agent-collab"> Claude와 Codex 교차 협업 사용</label>
+      <div class="row-flex end">
+        <button class="btn" type="button" data-close>취소</button>
+        <button class="btn primary">추가</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- agent menu -->
+  <dialog id="dlg-agent-menu">
+    <div class="form" style="padding:8px 0 12px">
+      <button class="arow" data-act="rename">이름 바꾸기</button>
+      <button class="arow" data-act="reset">새 세션으로 시작 (대화 맥락 초기화)</button>
+      <button class="arow" data-act="clear">화면 기록 지우기</button>
+      <button class="arow danger" data-act="delete">에이전트 삭제</button>
+      <div class="row-flex end" style="padding:8px 16px 0"><button class="btn" data-close>닫기</button></div>
+    </div>
+  </dialog>
+
+  <!-- settings -->
+  <dialog id="dlg-settings">
+    <div class="form">
+      <h2>설정</h2>
+      <div class="kv"><span>서버</span><span id="set-host" class="mono"></span></div>
+      <div class="kv"><span>Claude</span><span id="set-claude" class="mono small"></span></div>
+      <div class="kv"><span>Codex</span><span id="set-codex" class="mono"></span></div>
+      <hr>
+      <h3>알림</h3>
+      <p class="muted small">홈 화면에 설치한 뒤 켜면 승인 요청·완료 알림이 폰으로 옵니다.</p>
+      <div class="row-flex">
+        <button class="btn primary" id="btn-push">푸시 알림 켜기</button>
+        <button class="btn" id="btn-push-test">테스트</button>
+      </div>
+      <p class="muted small" id="push-status"></p>
+      <hr>
+      <div class="row-flex">
+        <button class="btn danger" id="btn-logout">토큰 지우기</button>
+        <div class="spacer"></div>
+        <button class="btn" data-close>닫기</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- generic text modal (commit detail etc) -->
+  <dialog id="dlg-text">
+    <div class="form">
+      <h2 id="text-title" class="mono"></h2>
+      <pre id="text-body" class="pre"></pre>
+      <div class="row-flex end"><button class="btn" data-close>닫기</button></div>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>

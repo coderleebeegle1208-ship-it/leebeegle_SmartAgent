@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Remote — Direction C · Designer's philosophy · Teenage Engineering</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<style>
+/* ---------- tokens: one system, three screens ---------- */
+:root{
+  --canvas:#E3E1DB;          /* page ground around the phones */
+  --panel:#F1F0EB;           /* phone body: warm instrument off-white */
+  --surface:#FFFFFF;         /* inset fields */
+  --ink:#1A1917;             /* primary text, filled lamps, primary button */
+  --ink-2:#5C5A55;           /* secondary text — 5.5:1 on panel */
+  --ink-3:#8A8781;           /* hairline glyphs only, never body text */
+  --line:#CFCDC6;            /* hairline */
+  --signal:#F26B1D;          /* THE one signal colour: approval needed */
+  --live:#2F9E44;            /* connection lamp only */
+  --danger:#B42318;          /* destructive text, restrained */
+
+  --sans:"Pretendard Variable",Pretendard,"Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",system-ui,sans-serif;
+  --mono:"JetBrains Mono","SF Mono","Cascadia Mono",Consolas,"Malgun Gothic",monospace;
+
+  --r:6px;                   /* one corner radius, small: machined not puffy */
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--canvas);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.6;-webkit-font-smoothing:antialiased}
+body{padding:32px 32px 56px}
+
+/* ---------- page header strip ---------- */
+.dir{max-width:1320px;margin:0 auto 28px;display:grid;grid-template-columns:1fr auto;gap:24px;align-items:end;border-bottom:1px solid var(--ink);padding-bottom:18px}
+.dir h1{font-size:20px;font-weight:600;letter-spacing:-.01em;line-height:1.3}
+.dir h1 span{font-family:var(--mono);font-weight:500;font-size:13px;color:var(--ink-2);display:block;margin-bottom:6px;letter-spacing:.04em;text-transform:uppercase}
+.dir p{margin-top:8px;font-size:14px;color:var(--ink-2);max-width:62ch}
+.sw{display:flex;gap:10px;align-items:flex-end}
+.sw div{width:52px}
+.sw i{display:block;height:36px;border-radius:4px;border:1px solid rgba(0,0,0,.12)}
+.sw b{display:block;font:500 11px/1.4 var(--mono);color:var(--ink-2);margin-top:6px;text-transform:uppercase;letter-spacing:.02em}
+
+/* ---------- canvas with three frames ---------- */
+.row{max-width:1320px;margin:0 auto;display:flex;gap:56px;justify-content:center;align-items:flex-start;flex-wrap:wrap}
+.slot{width:390px}
+.slot > h2{font:500 12px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);margin:0 0 12px 2px;display:flex;justify-content:space-between}
+.frame{width:390px;height:844px;overflow:hidden;position:relative;background:var(--panel);border-radius:28px;box-shadow:0 1px 0 rgba(0,0,0,.06),0 24px 48px -24px rgba(26,25,23,.35);border:1px solid rgba(0,0,0,.08);display:flex;flex-direction:column}
+
+/* ---------- shared components ---------- */
+.top{height:56px;flex:0 0 56px;display:flex;align-items:center;padding:0 8px 0 20px;gap:10px;border-bottom:1px solid var(--line)}
+.top .name{font-weight:600;font-size:16px;letter-spacing:-.01em;flex:1;display:flex;align-items:center;gap:10px}
+.lamp-live{width:10px;height:10px;border-radius:50%;background:var(--live);box-shadow:0 0 0 3px rgba(47,158,68,.18)}
+.ib{width:44px;height:44px;display:flex;align-items:center;justify-content:center;border-radius:var(--r);color:var(--ink)}
+.ib svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
+.top .ib.back{margin-left:-8px}
+.top h3{font-size:18px;font-weight:600;letter-spacing:-.01em;flex:1;line-height:1.3}
+
+.lbl{font:500 12px/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-2)}
+
+/* instrument strip: label above value */
+.inst{display:grid;grid-template-columns:1fr auto;gap:0 16px;padding:14px 20px 12px;border-bottom:1px solid var(--line);align-items:end}
+.inst .v{font-size:20px;font-weight:600;letter-spacing:-.01em;line-height:1.2;margin-top:6px}
+.inst .st{display:flex;align-items:center;gap:8px;font:500 12px/1 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink)}
+.meters{display:flex;gap:18px;margin-top:8px}
+.meter{display:flex;align-items:center;gap:8px;font:500 12px/1 var(--mono);color:var(--ink-2);font-variant-numeric:tabular-nums}
+.meter .bar{width:56px;height:6px;background:var(--line);border-radius:2px;overflow:hidden}
+.meter .bar i{display:block;height:100%;background:var(--ink)}
+.meter b{font-weight:500;color:var(--ink)}
+
+/* count tiles as a segmented meter row */
+.seg{display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--line);background:var(--surface)}
+.seg a{display:block;padding:12px 12px 10px;border-right:1px solid var(--line);text-decoration:none;color:var(--ink);position:relative;min-height:74px}
+.seg a:last-child{border-right:0}
+.seg .lbl{color:var(--ink-2)}
+.seg .n{display:block;font:500 28px/1.1 var(--mono);font-variant-numeric:tabular-nums;margin-top:8px;letter-spacing:-.02em}
+.seg a.on::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:3px;background:var(--ink)}
+.seg a.hot{background:var(--signal);border-right-color:rgba(0,0,0,.25)}
+.seg a.hot .lbl,.seg a.hot .n{color:var(--ink)}
+
+/* workspace group */
+.grp{padding:16px 20px 8px;display:grid;grid-template-columns:1fr auto;gap:12px;align-items:start}
+.grp .t{font-size:16px;font-weight:600;letter-spacing:-.01em;line-height:1.3}
+.grp .p{font:400 12px/1.4 var(--mono);color:var(--ink-2);margin-top:3px;word-break:break-all}
+.acts{display:flex;gap:6px}
+.btn{height:44px;display:inline-flex;align-items:center;justify-content:center;padding:0 14px;border:1px solid var(--ink);border-radius:var(--r);font:500 14px/1 var(--sans);color:var(--ink);text-decoration:none;white-space:nowrap;background:transparent}
+.btn.fill{background:var(--ink);color:#fff}
+.btn.quiet{border-color:var(--line);color:var(--ink)}
+.btn.danger{border-color:var(--line);color:var(--danger)}
+
+/* ledger rows */
+.ledger{border-top:1px solid var(--line)}
+.ag{display:grid;grid-template-columns:28px 1fr auto;gap:0 10px;padding:12px 20px 12px 16px;border-bottom:1px solid var(--line);min-height:84px;text-decoration:none;color:var(--ink)}
+.ag .lamp{width:12px;height:12px;margin-top:5px;border:1.5px solid var(--ink);border-radius:2px}
+.ag .lamp.run{background:var(--ink)}
+.ag .lamp.done{border-color:var(--ink-3)}
+.ag .lamp.hot{background:var(--signal);border-color:var(--signal)}
+.ag .h{display:flex;align-items:baseline;gap:8px}
+.ag .who{font:500 12px/1 var(--mono);letter-spacing:.06em;color:var(--ink-2)}
+.ag .ttl{font-size:16px;font-weight:600;letter-spacing:-.01em;line-height:1.3}
+.ag .snip{font-size:14px;color:var(--ink-2);line-height:1.55;margin-top:4px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.ag .side{text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.chip{display:inline-block;font:500 12px/1 var(--mono);letter-spacing:.02em;padding:5px 7px;border-radius:4px;border:1px solid var(--line);color:var(--ink-2);white-space:nowrap}
+.chip.hot{background:var(--signal);border-color:var(--signal);color:var(--ink);font-weight:600}
+.chip.ink{border-color:var(--ink);color:var(--ink)}
+.ag .time{font:400 12px/1 var(--mono);color:var(--ink-2)}
+
+/* FAB: a machined square */
+.fab{position:absolute;right:20px;bottom:24px;width:56px;height:56px;border-radius:12px;background:var(--ink);color:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 8px 20px -8px rgba(26,25,23,.6)}
+.fab svg{width:24px;height:24px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round}
+
+/* ---------- screen 2 ---------- */
+.meta{padding:12px 20px 14px;border-bottom:1px solid var(--line)}
+.badges{display:flex;gap:6px;flex-wrap:wrap}
+.meta .p{font:400 12px/1.4 var(--mono);color:var(--ink-2);margin-top:10px;word-break:break-all}
+.approve{margin:16px 16px 0;background:var(--signal);border-radius:10px;padding:14px;color:var(--ink)}
+.approve .lbl{color:var(--ink);opacity:.8}
+.approve h4{font-size:18px;font-weight:700;letter-spacing:-.01em;line-height:1.3;margin-top:6px}
+.cmd{margin-top:10px;background:var(--ink);color:#fff;font:500 14px/1.5 var(--mono);padding:11px 12px;border-radius:var(--r);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cmd::before{content:"$ ";color:#B7B4AC}
+.field{margin-top:10px;height:44px;background:var(--surface);border:1px solid rgba(0,0,0,.2);border-radius:var(--r);display:flex;align-items:center;padding:0 12px;font-size:14px;color:var(--ink-2)}
+.approve .acts{margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.approve .btn{height:48px;font-size:16px;font-weight:600}
+
+.stream{flex:1;overflow:hidden;padding:18px 16px 0;display:flex;flex-direction:column;gap:12px}
+.msg.user{align-self:flex-end;max-width:82%;background:var(--ink);color:#fff;padding:10px 14px;border-radius:12px 12px 4px 12px;font-size:15px;line-height:1.55}
+.msg.ai{font-size:15px;line-height:1.6;padding:0 4px;max-width:92%}
+.tool{font:500 13px/1.4 var(--mono);color:var(--ink);padding:6px 4px;display:flex;align-items:center;gap:10px}
+.tool::before{content:"";width:8px;height:8px;border:1.5px solid var(--ink);border-radius:2px;flex:0 0 8px}
+.tool b{font-weight:600;color:var(--ink-2)}
+.tool.res{color:var(--ink-2);padding-left:22px}
+.tool.res::before{display:none}
+.sys{display:flex;align-items:center;gap:10px;font:400 12px/1.4 var(--mono);color:var(--ink-2);margin-top:4px}
+.sys::before,.sys::after{content:"";flex:1;border-top:1px solid var(--line)}
+.sys em{font-style:normal;color:var(--ink);font-weight:500}
+
+.composer{flex:0 0 auto;padding:10px 16px 20px;border-top:1px solid var(--line);display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end;background:var(--panel)}
+.ta{min-height:48px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:12px;font-size:15px;color:var(--ink-2);line-height:1.5}
+.stop{height:48px;padding:0 14px;display:inline-flex;align-items:center;gap:8px;border:1px solid var(--ink);border-radius:var(--r);font-weight:600;font-size:15px;color:var(--ink);text-decoration:none}
+.stop i{width:10px;height:10px;background:var(--ink);border-radius:1px}
+
+/* ---------- screen 3 ---------- */
+.sub{padding:12px 20px 0}
+.sub .p{font:400 12px/1.4 var(--mono);color:var(--ink-2);word-break:break-all}
+.two{display:grid;grid-template-columns:1fr 1fr;margin:12px 20px 0;border:1px solid var(--line);border-radius:var(--r);background:var(--surface);overflow:hidden}
+.two div{padding:10px 14px}
+.two div + div{border-left:1px solid var(--line)}
+.two .v{font:500 18px/1.2 var(--mono);margin-top:6px;font-variant-numeric:tabular-nums}
+.two .v small{font:500 13px var(--sans);color:var(--ink-2);margin-left:2px}
+.sec{padding:22px 20px 8px;display:flex;justify-content:space-between;align-items:baseline}
+.sec .k{font-size:16px;font-weight:600;letter-spacing:-.01em}
+.fl{display:grid;grid-template-columns:28px 1fr;align-items:center;gap:8px;padding:0 20px;min-height:44px;border-top:1px solid var(--line);font:500 14px/1.4 var(--mono)}
+.fl:last-of-type{border-bottom:1px solid var(--line)}
+.fl b{font-weight:600;color:var(--ink);width:22px;height:22px;border:1px solid var(--ink);border-radius:3px;display:inline-flex;align-items:center;justify-content:center;font-size:12px}
+.fl b.a{border-color:var(--ink-3);color:var(--ink-2)}
+.cm{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:baseline;padding:12px 20px;min-height:52px;border-top:1px solid var(--line);text-decoration:none;color:var(--ink)}
+.cm:last-of-type{border-bottom:1px solid var(--line)}
+.cm .h{font:500 13px/1 var(--mono);color:var(--ink)}
+.cm .m{font-size:15px;line-height:1.45}
+.cm .t{font:400 12px/1 var(--mono);color:var(--ink-2);white-space:nowrap}
+.wsacts{margin-top:auto;padding:0 20px 24px;display:grid;gap:8px}
+.wsacts .btn{height:48px;font-size:15px}
+</style>
+</head>
+<body>
+
+<header class="dir">
+  <div>
+    <h1><span>Direction C · Designer's philosophy · Teenage Engineering (Dieter Rams lineage)</span>인스트루먼트 패널로서의 원격 제어실</h1>
+    <p>TE의 방식대로: 화면을 "카드 더미"가 아니라 계기판으로 짠다 — 라벨은 값 위에 모노 소문자로, 상태는 램프(작은 사각형)로, 구분은 헤어라인 하나로. 색은 딱 하나(신호 오렌지)만 쓰고, 그것은 오직 "승인 필요"에만 켜진다. 나머지는 따뜻한 오프화이트와 잉크 블랙뿐이라 야외 30cm에서도 어디를 눌러야 하는지 즉시 보인다.</p>
+  </div>
+  <div class="sw">
+    <div><i style="background:#F1F0EB"></i><b>F1F0EB panel</b></div>
+    <div><i style="background:#FFFFFF"></i><b>FFFFFF field</b></div>
+    <div><i style="background:#CFCDC6"></i><b>CFCDC6 line</b></div>
+    <div><i style="background:#5C5A55"></i><b>5C5A55 ink-2</b></div>
+    <div><i style="background:#1A1917"></i><b>1A1917 ink</b></div>
+    <div><i style="background:#F26B1D"></i><b>F26B1D signal</b></div>
+    <div><i style="background:#2F9E44"></i><b>2F9E44 live</b></div>
+    <div><i style="background:#B42318"></i><b>B42318 danger</b></div>
+  </div>
+</header>
+
+<main class="row">
+
+<!-- ================= SCREEN 1 · HOME ================= -->
+<section class="slot">
+  <h2><span>01 · Home</span><span>390 × 844</span></h2>
+  <div class="frame">
+    <div class="top">
+      <div class="name"><span class="lamp-live" aria-label="연결됨"></span>Agent Remote</div>
+      <a class="ib" href="#" aria-label="새로고침"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></a>
+      <a class="ib" href="#" aria-label="설정"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="2" fill="#F1F0EB"/><circle cx="15" cy="12" r="2" fill="#F1F0EB"/><circle cx="8" cy="17" r="2" fill="#F1F0EB"/></svg></a>
+    </div>
+
+    <!-- machine strip -->
+    <div class="inst">
+      <div>
+        <div class="lbl">machine</div>
+        <div class="v">leebeegle</div>
+        <div class="meters">
+          <div class="meter">CPU <span class="bar"><i style="width:12%"></i></span><b>12%</b></div>
+          <div class="meter">RAM <span class="bar"><i style="width:41%"></i></span><b>41%</b></div>
+        </div>
+      </div>
+      <div class="st"><span class="lamp-live" style="box-shadow:none;width:8px;height:8px"></span>Connected</div>
+    </div>
+
+    <!-- count tiles = segmented meter -->
+    <nav class="seg" aria-label="상태 필터">
+      <a href="#" class="on"><span class="lbl">전체</span><span class="n">6</span></a>
+      <a href="#" class="hot"><span class="lbl">승인 필요</span><span class="n">1</span></a>
+      <a href="#"><span class="lbl">작업 중</span><span class="n">2</span></a>
+      <a href="#"><span class="lbl">완료</span><span class="n">3</span></a>
+    </nav>
+
+    <!-- workspace: herdr-frontend -->
+    <div class="grp">
+      <div>
+        <div class="t">herdr-frontend</div>
+        <div class="p">~/Documents/Programming/herdr-frontend</div>
+      </div>
+      <div class="acts">
+        <a class="btn quiet" href="#">커밋</a>
+        <a class="btn" href="#">＋ 에이전트</a>
+      </div>
+    </div>
+    <div class="ledger">
+      <a class="ag" href="#">
+        <span class="lamp hot"></span>
+        <div>
+          <div class="h"><span class="who">CLAUDE</span><span class="ttl">리팩터링</span></div>
+          <div class="snip">npm test 실행 승인이 필요합니다</div>
+        </div>
+        <div class="side"><span class="chip hot">승인 필요</span><span class="time">방금</span></div>
+      </a>
+      <a class="ag" href="#">
+        <span class="lamp run"></span>
+        <div>
+          <div class="h"><span class="who">CODEX</span><span class="ttl">문서 정리</span></div>
+          <div class="snip">README의 설치 절차를 다시 쓰는 중입니다…</div>
+        </div>
+        <div class="side"><span class="chip ink">작업 중</span><span class="time">3분 전</span></div>
+      </a>
+      <a class="ag" href="#">
+        <span class="lamp done"></span>
+        <div>
+          <div class="h"><span class="who">CLAUDE</span><span class="ttl">버그 수정</span></div>
+          <div class="snip">로그인 폼의 빈 값 검증을 추가하고 테스트 3개를 통과시켰습니다.</div>
+        </div>
+        <div class="side"><span class="chip">완료</span><span class="time">11분 전</span></div>
+      </a>
+    </div>
+
+    <!-- workspace: youtube-shorts -->
+    <div class="grp">
+      <div>
+        <div class="t">youtube-shorts</div>
+        <div class="p">~/Documents/Programming/youtube-shorts</div>
+      </div>
+      <div class="acts">
+        <a class="btn quiet" href="#">커밋</a>
+        <a class="btn" href="#">＋ 에이전트</a>
+      </div>
+    </div>
+    <div class="ledger">
+      <a class="ag" href="#">
+        <span class="lamp done"></span>
+        <div>
+          <div class="h"><span class="who">CLAUDE</span><span class="ttl">자막 생성기</span></div>
+          <div class="snip">자막 SRT 12개를 생성했습니다.</div>
+        </div>
+        <div class="side"><span class="chip">완료</span><span class="time">1시간 전</span></div>
+      </a>
+    </div>
+
+    <a class="fab" href="#" aria-label="워크스페이스 추가"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></a>
+  </div>
+</section>
+
+<!-- ================= SCREEN 2 · AGENT DETAIL ================= -->
+<section class="slot">
+  <h2><span>02 · Agent detail</span><span>390 × 844</span></h2>
+  <div class="frame">
+    <div class="top">
+      <a class="ib back" href="#" aria-label="뒤로"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></a>
+      <h3>리팩터링</h3>
+    </div>
+    <div class="meta">
+      <div class="badges">
+        <span class="chip ink">CLAUDE</span>
+        <span class="chip hot">승인 필요</span>
+        <span class="chip">매번 승인</span>
+      </div>
+      <div class="p">~/Documents/Programming/herdr-frontend</div>
+    </div>
+
+    <!-- the loudest element -->
+    <div class="approve">
+      <div class="lbl">permission · bash</div>
+      <h4>Bash 실행 승인</h4>
+      <div class="cmd">npm test -- --coverage</div>
+      <div class="field">거부 사유 (선택)</div>
+      <div class="acts">
+        <a class="btn" href="#">거부</a>
+        <a class="btn fill" href="#">허용</a>
+      </div>
+    </div>
+
+    <div class="stream">
+      <div class="msg user">auth 모듈 테스트 커버리지 80% 이상으로 올려줘</div>
+      <div class="msg ai">현재 커버리지는 62%입니다. 누락된 분기 4개에 테스트를 추가하겠습니다.</div>
+      <div class="tool"><b>Read</b> src/auth/login.ts</div>
+      <div class="tool"><b>Edit</b> tests/auth.test.ts</div>
+      <div class="tool res">Tests: 12 passed, 0 failed</div>
+      <div class="sys">승인 요청 · <em>Bash: npm test -- --coverage</em></div>
+    </div>
+
+    <div class="composer">
+      <div class="ta">지시를 입력하세요…</div>
+      <a class="stop" href="#"><i></i>중지</a>
+    </div>
+  </div>
+</section>
+
+<!-- ================= SCREEN 3 · WORKSPACE COMMITS ================= -->
+<section class="slot">
+  <h2><span>03 · Workspace commits</span><span>390 × 844</span></h2>
+  <div class="frame">
+    <div class="top">
+      <a class="ib back" href="#" aria-label="뒤로"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></a>
+      <h3>herdr-frontend</h3>
+    </div>
+    <div class="sub">
+      <div class="p">~/Documents/Programming/herdr-frontend</div>
+    </div>
+    <div class="two">
+      <div><div class="lbl">브랜치</div><div class="v">main</div></div>
+      <div><div class="lbl">변경 파일</div><div class="v">2<small>개</small></div></div>
+    </div>
+
+    <div class="sec"><span class="k">커밋 안 된 변경</span><span class="lbl">uncommitted</span></div>
+    <div class="fl"><b>M</b><span>src/auth/login.ts</span></div>
+    <div class="fl"><b class="a">A</b><span>tests/auth.test.ts</span></div>
+
+    <div class="sec"><span class="k">최근 커밋</span><span class="lbl">log · main</span></div>
+    <a class="cm" href="#"><span class="h">a91f2c3</span><span class="m">auth: add empty-value validation</span><span class="t">11분 전</span></a>
+    <a class="cm" href="#"><span class="h">5d0e77b</span><span class="m">docs: rewrite install steps</span><span class="t">2시간 전</span></a>
+    <a class="cm" href="#"><span class="h">300c9a9</span><span class="m">init</span><span class="t">어제</span></a>
+
+    <div class="wsacts">
+      <a class="btn quiet" href="#">이름 변경</a>
+      <a class="btn danger" href="#">워크스페이스 삭제</a>
+    </div>
+  </div>
+</section>
+
+</main>
+</body>
+</html>

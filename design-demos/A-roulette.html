@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Remote · Direction A · Warm Editorial</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Noto+Serif+KR:wght@500;600&family=Noto+Sans+KR:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* =========================================================
+   Direction A · Style roulette #12 · Warm Editorial
+   (奶油纸底 + 赤陶橙 + 衬线×无衬线混排)
+
+   Colour derivation (protocol: sample → converge → argue)
+   - Sample: the cultural anchor of this style is a Penguin/Pelican
+     paperback and Anthropic cream + terracotta. A phone used
+     outdoors wants a paper ground (less glare than #FFF) and one
+     ink that means "look here".
+   - Converge (oklch): neutrals are one warm-hue ramp
+       paper L0.95 · paper-2 L0.91 · rule L0.85 · ink-3 L0.48
+       ink-2 L0.43 · ink L0.20
+     Chromatic: terracotta H≈40 (attention / primary action) and
+     moss green H≈150 (connection / done). Hue gap ≥110°, both
+     pressed to chroma ≈0.10–0.12 so they read as ink, not screen.
+   - Argue: terracotta is the ONLY loud colour and it is spent on
+     exactly one thing, approval. Everything at rest is ink on paper.
+
+   Contrast (WCAG, checked): ink/paper 15.2 · ink-2/paper 6.5 ·
+   ink-3/paper 5.2 · terra-dark/paper 6.4 · terra-dark/tint 5.6 ·
+   paper/terracotta 5.0 · terracotta/paper 5.0 · moss/paper 5.9
+   ========================================================= */
+:root{
+  --canvas:#DCD8D0;
+  --paper:#F4EFE6;
+  --paper-2:#EAE3D6;
+  --paper-3:#FBF8F2;
+  --rule:#D8CFC0;
+  --ink:#1C1A17;
+  --ink-2:#5A554C;
+  --ink-3:#68635A;
+  --terra:#A84A28;
+  --terra-dark:#8F3D22;
+  --terra-tint:#F3DDD1;
+  --moss:#37663F;
+
+  --serif:"Newsreader","Noto Serif KR","Apple SD Gothic Neo","Nanum Myeongjo","Batang",serif;
+  --sans:"Geist","Noto Sans KR","Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+  --mono:"Geist Mono","JetBrains Mono","Consolas","Noto Sans KR",monospace;
+
+  font-synthesis:none;
+  line-break:strict;
+  overflow-wrap:break-word;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{background:var(--canvas)}
+body{
+  font-family:var(--sans);
+  color:var(--ink);
+  font-size:15px;
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+  padding:32px 28px 56px;
+}
+a{color:inherit;text-decoration:none}
+button,input,textarea{font:inherit;color:inherit;background:none;border:0}
+.num{font-variant-numeric:tabular-nums slashed-zero}
+
+/* ---------- page header (direction strip) ---------- */
+.dir{max-width:1260px;margin:0 auto 28px;display:grid;grid-template-columns:1fr auto;gap:20px 40px;align-items:end;border-bottom:1px solid #B9B2A6;padding-bottom:20px}
+.dir h1{font-family:var(--serif);font-weight:500;font-size:26px;line-height:1.25;color:var(--ink);text-wrap:balance}
+.dir h1 em{font-style:italic;font-weight:400;color:var(--terra-dark)}
+.dir p{margin-top:8px;font-size:14px;color:#3F3B35;max-width:64ch;text-wrap:pretty}
+.swatches{display:flex;gap:10px;flex-wrap:wrap}
+.sw{display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+.sw i{display:block;width:44px;height:30px;border:1px solid rgba(0,0,0,.14)}
+.sw b{font-family:var(--mono);font-weight:400;font-size:12px;color:#3F3B35;letter-spacing:.02em}
+.sw small{font-size:12px;color:#6B665D;line-height:1.2}
+
+/* ---------- screen row ---------- */
+.row{max-width:1260px;margin:0 auto;display:flex;gap:36px;justify-content:center;flex-wrap:wrap}
+figure{margin:0}
+figcaption{font-family:var(--mono);font-size:12px;letter-spacing:.06em;color:#4C4841;margin-bottom:10px;display:flex;justify-content:space-between;width:390px}
+figcaption span{color:#8A8478}
+.frame{
+  width:390px;height:844px;overflow:hidden;position:relative;
+  background:var(--paper);color:var(--ink);
+  border:1px solid #B9B2A6;border-radius:8px;
+  box-shadow:0 1px 0 rgba(0,0,0,.05);
+}
+
+/* ---------- shared components ---------- */
+.topbar{height:60px;display:flex;align-items:center;padding:6px 8px 0 20px;gap:8px}
+.topbar .brand{display:flex;align-items:center;gap:10px;flex:1;min-width:0}
+.topbar .brand .name{font-family:var(--serif);font-size:21px;font-weight:500;letter-spacing:-.005em;line-height:1}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--moss);flex:none}
+.dot.hollow{background:none;border:1.5px solid var(--ink-3);width:9px;height:9px}
+.dot.terra{background:var(--terra)}
+.iconbtn{width:44px;height:44px;display:grid;place-items:center;color:var(--ink);border-radius:6px}
+.iconbtn svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
+.label{font-family:var(--mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:500}
+.mono{font-family:var(--mono)}
+
+/* status words */
+.st{font-size:12px;font-weight:500;display:inline-flex;align-items:center;gap:6px}
+.st.need{color:var(--terra-dark);font-weight:600}
+.st.busy{color:var(--ink-2)}
+.st.done{color:var(--moss)}
+
+/* text buttons */
+.tbtn{height:44px;display:inline-flex;align-items:center;padding:0 10px;font-size:14px;font-weight:600;color:var(--ink);text-decoration:underline;text-underline-offset:4px;text-decoration-thickness:1px;text-decoration-color:var(--ink-3)}
+.obtn{height:48px;display:inline-flex;align-items:center;justify-content:center;padding:0 18px;border:1px solid var(--ink);border-radius:6px;font-size:15px;font-weight:600;color:var(--ink)}
+.chip{height:28px;display:inline-flex;align-items:center;gap:6px;padding:0 10px;border-radius:14px;font-size:12px;font-weight:500;border:1px solid var(--rule);color:var(--ink-2)}
+.chip.need{background:var(--terra-tint);border-color:transparent;color:var(--terra-dark);font-weight:600}
+.chip.mono{font-family:var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}
+
+/* =========================================================
+   SCREEN 1 · Home, set like the contents page of a paperback:
+   masthead, colophon (the machine), index numerals, chapters
+   (workspaces) and their entries (agents) with times flush
+   right like page numbers. No cards; hairlines only. The one
+   entry that needs a human is printed on terracotta-tinted paper.
+   ========================================================= */
+.machine{padding:14px 20px 14px;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule)}
+.machine .l1{display:flex;align-items:baseline;justify-content:space-between}
+.machine .host{font-family:var(--serif);font-size:24px;font-weight:500;line-height:1.1;letter-spacing:-.005em}
+.machine .conn{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:500;color:var(--moss)}
+.machine .l2{margin-top:6px;font-family:var(--mono);font-size:13px;color:var(--ink-3);letter-spacing:.01em}
+
+.counts{display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--rule)}
+.counts a{display:block;padding:12px 0 10px 14px;border-left:1px solid var(--rule);min-height:72px;position:relative}
+.counts a:first-child{border-left:0;padding-left:20px}
+.counts .n{font-family:var(--serif);font-size:30px;font-weight:500;line-height:1;letter-spacing:-.01em}
+.counts .t{display:block;margin-top:6px;font-size:12px;color:var(--ink-3);font-weight:500}
+.counts a.on::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:2px;background:var(--ink)}
+.counts a.need .n,.counts a.need .t{color:var(--terra-dark)}
+
+.ws-head{display:flex;align-items:flex-end;justify-content:space-between;gap:8px;padding:18px 12px 6px 20px}
+.ws-head .nm{font-family:var(--serif);font-size:20px;font-weight:500;line-height:1.15;letter-spacing:-.005em}
+.ws-head .path{margin-top:3px;font-family:var(--mono);font-size:12px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px}
+.ws-head .acts{display:flex;gap:2px;flex:none;margin-bottom:-4px}
+
+.agent{display:block;padding:12px 20px 13px;border-top:1px solid var(--rule)}
+.agent .r1{display:flex;align-items:center;gap:10px}
+.agent .r1 .sep{width:1px;height:10px;background:var(--rule)}
+.agent .r1 .when{margin-left:auto;font-size:12px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+.agent .ttl{margin-top:4px;font-family:var(--serif);font-size:18px;font-weight:500;line-height:1.3}
+.agent .snip{margin-top:2px;font-size:14px;line-height:1.55;color:var(--ink-2);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;text-wrap:pretty}
+.agent.need{background:var(--terra-tint);border-top-color:transparent}
+.agent.need + .agent{border-top-color:transparent}
+.agent.need .snip{color:var(--terra-dark);font-weight:500}
+.agent.need .when{color:var(--terra-dark)}
+
+.fab{position:absolute;right:20px;bottom:24px;width:56px;height:56px;border-radius:50%;background:var(--ink);color:var(--paper);display:grid;place-items:center;box-shadow:0 6px 16px rgba(28,26,23,.22)}
+.fab svg{width:22px;height:22px;stroke:currentColor;stroke-width:2;stroke-linecap:round;fill:none}
+
+/* =========================================================
+   SCREEN 2 · Agent detail. The approval block is the only
+   solid terracotta on any screen; the transcript beneath is
+   set as running text, tool calls as a marginal list.
+   ========================================================= */
+.badges{display:flex;gap:8px;flex-wrap:wrap;padding:2px 20px 0}
+.pathline{padding:10px 20px 12px;font-family:var(--mono);font-size:12px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.approve{margin:6px 16px 0;background:var(--terra);color:var(--paper);border-radius:8px;padding:16px}
+.approve .hd{display:flex;align-items:baseline;justify-content:space-between;gap:10px}
+.approve .hd h2{font-family:var(--serif);font-size:21px;font-weight:500;line-height:1.2;letter-spacing:-.005em}
+.approve .hd .who{font-family:var(--mono);font-size:12px;letter-spacing:.06em;text-transform:uppercase}
+.approve .cmd{margin-top:12px;background:var(--paper-3);color:var(--ink);font-family:var(--mono);font-size:14px;line-height:1.5;padding:11px 12px;border-radius:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.approve .cmd b{font-weight:500;color:var(--ink-2)}
+.approve input{margin-top:10px;width:100%;height:44px;border:1px solid rgba(244,239,230,.55);border-radius:5px;padding:0 12px;font-size:14px;color:var(--paper)}
+.approve input::placeholder{color:var(--paper);opacity:1}
+.approve .btns{margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.approve .btns button{height:48px;border-radius:6px;font-size:15px;font-weight:600}
+.approve .deny{border:1px solid var(--paper);color:var(--paper)}
+.approve .allow{background:var(--paper);color:var(--terra)}
+
+.stream{padding:18px 20px 0;display:flex;flex-direction:column;gap:12px}
+.msg-user{align-self:flex-end;max-width:84%;background:var(--paper-2);padding:10px 14px;border-radius:14px 14px 4px 14px;font-size:15px;line-height:1.55}
+.msg-ai{font-size:15px;line-height:1.6;color:var(--ink);text-wrap:pretty;padding-right:12px}
+.tool{display:flex;align-items:baseline;gap:9px;font-family:var(--mono);font-size:13px;color:var(--ink-2);line-height:1.4;padding-left:2px}
+.tool::before{content:"";width:5px;height:5px;background:var(--ink-3);flex:none;transform:translateY(-2px)}
+.tool b{font-weight:500;color:var(--ink);min-width:36px}
+.tool-res{font-family:var(--mono);font-size:13px;color:var(--ink-3);background:var(--paper-2);padding:8px 11px;border-radius:4px;line-height:1.4}
+.sysnote{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--terra-dark);font-weight:500;margin-top:2px;white-space:nowrap}
+.sysnote::before,.sysnote::after{content:"";flex:1;min-width:12px;border-top:1px solid var(--rule)}
+
+.composer{position:absolute;left:0;right:0;bottom:0;background:var(--paper);border-top:1px solid var(--rule);padding:10px 16px 20px;display:flex;gap:10px;align-items:flex-end}
+.composer textarea{flex:1;height:46px;min-height:46px;resize:none;border:1px solid var(--rule);border-radius:6px;padding:12px;font-size:15px;line-height:1.4;background:var(--paper-3)}
+.composer textarea::placeholder{color:var(--ink-3);opacity:1}
+.stop{height:46px;padding:0 14px;border:1px solid var(--ink);border-radius:6px;display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:600;color:var(--ink)}
+.stop::before{content:"";width:10px;height:10px;background:var(--ink)}
+
+/* =========================================================
+   SCREEN 3 · Workspace commits. Two short "chapters", the
+   destructive action set as plain terracotta text at the foot.
+   ========================================================= */
+.wshead{padding:2px 20px 14px;border-bottom:1px solid var(--rule)}
+.wshead .path{font-family:var(--mono);font-size:12px;color:var(--ink-3)}
+.wshead .branch{margin-top:8px;font-size:14px;color:var(--ink-2)}
+.wshead .branch .mono{color:var(--ink);font-weight:500}
+
+.sec-h{display:flex;align-items:baseline;justify-content:space-between;padding:20px 20px 8px}
+.sec-h h2{font-family:var(--serif);font-size:19px;font-weight:500;line-height:1.2}
+.sec-h .cnt{font-family:var(--serif);font-size:19px;color:var(--ink-3)}
+.file{display:flex;align-items:center;gap:12px;height:46px;padding:0 20px;border-top:1px solid var(--rule);font-family:var(--mono);font-size:14px}
+.file:last-child{border-bottom:1px solid var(--rule)}
+.file .k{width:22px;height:22px;display:grid;place-items:center;background:var(--paper-2);color:var(--ink);font-weight:500;font-size:12px;border-radius:3px;flex:none}
+.file .k.add{color:var(--moss)}
+.commit{display:block;padding:11px 20px 12px;border-top:1px solid var(--rule)}
+.commit:last-child{border-bottom:1px solid var(--rule)}
+.commit .l1{display:flex;align-items:baseline;justify-content:space-between;gap:10px}
+.commit .hash{font-family:var(--mono);font-size:13px;color:var(--ink-3);letter-spacing:.02em}
+.commit .when{font-size:12px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+.commit .msg{margin-top:2px;font-size:15px;line-height:1.45;color:var(--ink)}
+
+.wsacts{position:absolute;left:0;right:0;bottom:0;padding:0 20px 28px;display:flex;flex-direction:column;gap:6px}
+.wsacts .obtn{width:100%}
+.dbtn{height:44px;display:inline-flex;align-items:center;justify-content:center;font-size:14px;font-weight:500;color:var(--terra-dark)}
+
+@media (max-width:1100px){.dir{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<header class="dir">
+  <div>
+    <h1>Direction A · Style roulette · <em>Warm Editorial #12</em> — 奶油纸底 + 赤陶橙 + 衬线×无衬线混排</h1>
+    <p>종이 위의 잉크처럼 조용한 화면에서 테라코타 잉크 하나만 "승인 필요"에 쓰이므로, 30cm 거리의 한 손 조작에서도 주의가 필요한 지점이 즉시 구분된다 — 홈은 문고판의 차례 페이지처럼 워크스페이스를 장(章), 에이전트를 항목으로 조판했다.</p>
+  </div>
+  <div class="swatches">
+    <div class="sw"><i style="background:#F4EFE6"></i><b>#F4EFE6</b><small>paper</small></div>
+    <div class="sw"><i style="background:#EAE3D6"></i><b>#EAE3D6</b><small>paper-2</small></div>
+    <div class="sw"><i style="background:#D8CFC0"></i><b>#D8CFC0</b><small>rule</small></div>
+    <div class="sw"><i style="background:#68635A"></i><b>#68635A</b><small>ink-3</small></div>
+    <div class="sw"><i style="background:#5A554C"></i><b>#5A554C</b><small>ink-2</small></div>
+    <div class="sw"><i style="background:#1C1A17"></i><b>#1C1A17</b><small>ink</small></div>
+    <div class="sw"><i style="background:#A84A28"></i><b>#A84A28</b><small>terracotta</small></div>
+    <div class="sw"><i style="background:#8F3D22"></i><b>#8F3D22</b><small>terra-dark</small></div>
+    <div class="sw"><i style="background:#F3DDD1"></i><b>#F3DDD1</b><small>terra-tint</small></div>
+    <div class="sw"><i style="background:#37663F"></i><b>#37663F</b><small>moss</small></div>
+  </div>
+</header>
+
+<div class="row">
+
+<!-- ===================== SCREEN 1 · HOME ===================== -->
+<figure>
+  <figcaption>01 · 홈 <span>390 × 844</span></figcaption>
+  <div class="frame">
+    <div class="topbar">
+      <div class="brand"><span class="dot" aria-label="연결됨"></span><span class="name">Agent Remote</span></div>
+      <a class="iconbtn" href="#" aria-label="새로고침"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></a>
+      <a class="iconbtn" href="#" aria-label="설정"><svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></a>
+    </div>
+
+    <section class="machine">
+      <div class="l1">
+        <span class="host">leebeegle</span>
+        <span class="conn"><span class="dot"></span>Connected</span>
+      </div>
+      <div class="l2 num">CPU 12% · RAM 41%</div>
+    </section>
+
+    <nav class="counts" aria-label="상태 필터">
+      <a class="on" href="#"><span class="n num">6</span><span class="t">전체</span></a>
+      <a class="need" href="#"><span class="n num">1</span><span class="t">승인 필요</span></a>
+      <a href="#"><span class="n num">2</span><span class="t">작업 중</span></a>
+      <a href="#"><span class="n num">3</span><span class="t">완료</span></a>
+    </nav>
+
+    <section class="ws">
+      <div class="ws-head">
+        <div>
+          <div class="nm">herdr-frontend</div>
+          <div class="path">~/Documents/Programming/herdr-frontend</div>
+        </div>
+        <div class="acts">
+          <a class="tbtn" href="#">커밋</a>
+          <a class="tbtn" href="#">＋ 에이전트</a>
+        </div>
+      </div>
+
+      <a class="agent need" href="#">
+        <div class="r1"><span class="label">Claude</span><span class="sep"></span><span class="st need"><span class="dot terra"></span>승인 필요</span><span class="when">방금</span></div>
+        <div class="ttl">리팩터링</div>
+        <div class="snip">npm test 실행 승인이 필요합니다</div>
+      </a>
+      <a class="agent" href="#">
+        <div class="r1"><span class="label">Codex</span><span class="sep"></span><span class="st busy"><span class="dot hollow"></span>작업 중</span><span class="when">3분 전</span></div>
+        <div class="ttl">문서 정리</div>
+        <div class="snip">README의 설치 절차를 다시 쓰는 중입니다…</div>
+      </a>
+      <a class="agent" href="#">
+        <div class="r1"><span class="label">Claude</span><span class="sep"></span><span class="st done"><span class="dot"></span>완료</span><span class="when">11분 전</span></div>
+        <div class="ttl">버그 수정</div>
+        <div class="snip">로그인 폼의 빈 값 검증을 추가하고 테스트 3개를 통과시켰습니다.</div>
+      </a>
+    </section>
+
+    <section class="ws">
+      <div class="ws-head">
+        <div>
+          <div class="nm">youtube-shorts</div>
+          <div class="path">~/Documents/Programming/youtube-shorts</div>
+        </div>
+        <div class="acts">
+          <a class="tbtn" href="#">커밋</a>
+          <a class="tbtn" href="#">＋ 에이전트</a>
+        </div>
+      </div>
+      <a class="agent" href="#">
+        <div class="r1"><span class="label">Claude</span><span class="sep"></span><span class="st done"><span class="dot"></span>완료</span><span class="when">1시간 전</span></div>
+        <div class="ttl">자막 생성기</div>
+        <div class="snip">자막 SRT 12개를 생성했습니다.</div>
+      </a>
+    </section>
+
+    <a class="fab" href="#" aria-label="워크스페이스 추가"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></a>
+  </div>
+</figure>
+
+<!-- ===================== SCREEN 2 · AGENT DETAIL ===================== -->
+<figure>
+  <figcaption>02 · 에이전트 상세 <span>390 × 844</span></figcaption>
+  <div class="frame">
+    <div class="topbar" style="padding-left:8px">
+      <a class="iconbtn" href="#" aria-label="뒤로"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></a>
+      <div class="brand"><span class="name">리팩터링</span></div>
+    </div>
+    <div class="badges">
+      <span class="chip mono">Claude</span>
+      <span class="chip need"><span class="dot terra"></span>승인 필요</span>
+      <span class="chip">매번 승인</span>
+    </div>
+    <div class="pathline">~/Documents/Programming/herdr-frontend</div>
+
+    <section class="approve" aria-label="승인 요청">
+      <div class="hd"><h2>Bash 실행 승인</h2><span class="who">Bash</span></div>
+      <div class="cmd"><b>$</b> npm test -- --coverage</div>
+      <input type="text" placeholder="거부 사유 (선택)" aria-label="거부 사유">
+      <div class="btns">
+        <button class="deny" type="button">거부</button>
+        <button class="allow" type="button">허용</button>
+      </div>
+    </section>
+
+    <div class="stream">
+      <div class="msg-user">auth 모듈 테스트 커버리지 80% 이상으로 올려줘</div>
+      <p class="msg-ai">현재 커버리지는 62%입니다. 누락된 분기 4개에 테스트를 추가하겠습니다.</p>
+      <div class="tool"><b>Read</b><span>src/auth/login.ts</span></div>
+      <div class="tool"><b>Edit</b><span>tests/auth.test.ts</span></div>
+      <div class="tool-res num">Tests: 12 passed, 0 failed</div>
+      <div class="sysnote">승인 요청 · <span class="mono">Bash: npm test -- --coverage</span></div>
+    </div>
+
+    <div class="composer">
+      <textarea placeholder="지시를 입력하세요…" aria-label="지시 입력"></textarea>
+      <button class="stop" type="button">중지</button>
+    </div>
+  </div>
+</figure>
+
+<!-- ===================== SCREEN 3 · WORKSPACE COMMITS ===================== -->
+<figure>
+  <figcaption>03 · 워크스페이스 커밋 <span>390 × 844</span></figcaption>
+  <div class="frame">
+    <div class="topbar" style="padding-left:8px">
+      <a class="iconbtn" href="#" aria-label="뒤로"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></a>
+      <div class="brand"><span class="name">herdr-frontend</span></div>
+    </div>
+    <div class="wshead">
+      <div class="path">~/Documents/Programming/herdr-frontend</div>
+      <div class="branch">브랜치 <span class="mono">main</span> · 변경 파일 <span class="num">2</span>개</div>
+    </div>
+
+    <section class="sec">
+      <div class="sec-h"><h2>커밋 안 된 변경</h2><span class="cnt num">2</span></div>
+      <div class="file"><span class="k">M</span><span>src/auth/login.ts</span></div>
+      <div class="file"><span class="k add">A</span><span>tests/auth.test.ts</span></div>
+    </section>
+
+    <section class="sec">
+      <div class="sec-h"><h2>최근 커밋</h2><span class="cnt num">3</span></div>
+      <a class="commit" href="#">
+        <div class="l1"><span class="hash">a91f2c3</span><span class="when">11분 전</span></div>
+        <div class="msg">auth: add empty-value validation</div>
+      </a>
+      <a class="commit" href="#">
+        <div class="l1"><span class="hash">5d0e77b</span><span class="when">2시간 전</span></div>
+        <div class="msg">docs: rewrite install steps</div>
+      </a>
+      <a class="commit" href="#">
+        <div class="l1"><span class="hash">300c9a9</span><span class="when">어제</span></div>
+        <div class="msg">init</div>
+      </a>
+    </section>
+
+    <div class="wsacts">
+      <a class="obtn" href="#">이름 변경</a>
+      <a class="dbtn" href="#">워크스페이스 삭제</a>
+    </div>
+  </div>
+</figure>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,404 @@
+// Agent Remote — phone-first dashboard for Claude Code / Codex running on this PC.
+import http from 'node:http';
+import os from 'node:os';
+import fs from 'node:fs';
+import path from 'node:path';
+import express from 'express';
+import { WebSocketServer } from 'ws';
+import { loadConfig } from './config.js';
+import { PUBLIC_DIR } from './paths.js';
+import { AgentSessions, Workspaces, Agents, Messages, Approvals, PushSubs } from './db.js';
+import { bus, emit } from './bus.js';
+import { initPush, sendPush } from './push.js';
+import { gitSummary, gitCommitDiff, gitRemote, setGitRemote } from './git.js';
+import { requestApproval, waitForApproval, resolveApproval } from './approvals.js';
+import { startPrompt, stopAgent, isRunning, runningIds, executePlan, switchProvider } from './runners/index.js';
+import { findClaudeBin } from './runners/claude.js';
+import { findCodexEntry } from './runners/codex.js';
+import { getUsage } from './usage.js';
+import { CAPTURE_DIR, captureScreenshot, findBrowserBin } from './capture.js';
+import { MODEL_CATALOG, isModelAllowed } from './models.js';
+
+const cfg = loadConfig();
+initPush(cfg);
+
+// A restart means no agent process survived: clear stale "working"/"needs_attention" states.
+for (const a of Agents.all()) {
+  if (a.status === 'working' || a.status === 'needs_attention') {
+    Approvals.expireForAgent(a.id);
+    Agents.update(a.id, { status: a.pending_plan ? 'needs_attention' : 'idle', collab_stage: null });
+  }
+}
+
+const app = express();
+app.disable('x-powered-by');
+app.use(express.json({ limit: '2mb' }));
+
+// ---------- auth ----------
+function tokenFrom(req) {
+  const h = req.headers.authorization || '';
+  if (h.startsWith('Bearer ')) return h.slice(7);
+  return req.query.token || null;
+}
+function requireAuth(req, res, next) {
+  if (tokenFrom(req) === cfg.token) return next();
+  res.status(401).json({ error: 'unauthorized' });
+}
+function requireInternal(req, res, next) {
+  if (tokenFrom(req) === cfg.internalToken) return next();
+  res.status(401).json({ error: 'unauthorized' });
+}
+
+// ---------- system stats ----------
+let stats = { cpu: 0, mem: 0, host: os.hostname() };
+let prevCpu = os.cpus().map((c) => ({ ...c.times }));
+setInterval(() => {
+  const cur = os.cpus().map((c) => ({ ...c.times }));
+  let idle = 0, total = 0;
+  cur.forEach((t, i) => {
+    const p = prevCpu[i] || t;
+    const dIdle = t.idle - p.idle;
+    const dTotal = Object.keys(t).reduce((s, k) => s + (t[k] - p[k]), 0);
+    idle += dIdle;
+    total += dTotal;
+  });
+  prevCpu = cur;
+  stats = {
+    cpu: total ? Math.round((1 - idle / total) * 100) : 0,
+    mem: Math.round((1 - os.freemem() / os.totalmem()) * 100),
+    host: os.hostname(),
+  };
+}, 3000).unref();
+
+function agentView(a) {
+  const saved = Object.fromEntries(AgentSessions.forAgent(a.id).map((s) => [s.kind, true]));
+  if (a.session_id) saved[a.kind] = true;
+  return {
+    ...a,
+    running: isRunning(a.id),
+    pending_approvals: Approvals.pendingForAgent(a.id).length,
+    provider_sessions: { claude: !!saved.claude, codex: !!saved.codex },
+  };
+}
+
+// ---------- public config (no auth) ----------
+app.get('/api/meta', (req, res) => {
+  res.json({ host: os.hostname(), vapidPublicKey: cfg.vapid.publicKey });
+});
+app.post('/api/auth/check', (req, res) => {
+  res.json({ ok: (req.body?.token || '') === cfg.token });
+});
+
+// ---------- authenticated API ----------
+const api = express.Router();
+api.use(requireAuth);
+
+// `git remote` per workspace is cheap but not free, and /state is polled; cache briefly.
+const remoteCache = new Map(); // path -> { at, info }
+const REMOTE_TTL = 60_000;
+function cachedRemote(p) {
+  const hit = remoteCache.get(p);
+  if (hit && Date.now() - hit.at < REMOTE_TTL) return hit.info;
+  if (!hit) remoteCache.set(p, { at: Date.now(), info: null });
+  else hit.at = Date.now();
+  gitRemote(p).then((info) => remoteCache.set(p, { at: Date.now(), info })).catch(() => {});
+  return hit?.info ?? null;
+}
+
+api.get('/workspaces/:id/remote', async (req, res) => {
+  const ws = Workspaces.get(Number(req.params.id));
+  if (!ws) return res.status(404).json({ error: 'not found' });
+  const info = await gitRemote(ws.path);
+  remoteCache.set(ws.path, { at: Date.now(), info });
+  res.json(info);
+});
+api.post('/workspaces/:id/remote', async (req, res) => {
+  const ws = Workspaces.get(Number(req.params.id));
+  if (!ws) return res.status(404).json({ error: 'not found' });
+  try {
+    const info = await setGitRemote(ws.path, req.body?.url);
+    remoteCache.set(ws.path, { at: Date.now(), info });
+    emit('workspace.updated', { workspace: ws });
+    res.json(info);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+api.get('/state', (req, res) => {
+  const workspaces = Workspaces.all().map((w) => ({ ...w, repo: cachedRemote(w.path) }));
+  const agents = Agents.all().map(agentView);
+  const counts = { all: agents.length, needs_attention: 0, working: 0, done: 0, error: 0, idle: 0 };
+  for (const a of agents) counts[a.status] = (counts[a.status] || 0) + 1;
+  res.json({
+    computer: { name: os.hostname(), platform: process.platform, ...stats, connected: true },
+    tools: { claude: findClaudeBin(), codex: !!findCodexEntry(), capture: !!findBrowserBin() },
+    models: MODEL_CATALOG,
+    workspaces,
+    agents,
+    counts,
+  });
+});
+
+api.get('/usage', async (req, res) => {
+  res.json(await getUsage(req.query.refresh === '1'));
+});
+
+api.post('/workspaces', (req, res) => {
+  const { name, path: p } = req.body || {};
+  if (!p) return res.status(400).json({ error: 'path required' });
+  const abs = path.resolve(p);
+  if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) return res.status(400).json({ error: '폴더가 존재하지 않습니다: ' + abs });
+  try {
+    const ws = Workspaces.create(name?.trim() || path.basename(abs), abs);
+    emit('workspace.created', { workspace: ws });
+    res.json(ws);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+api.patch('/workspaces/:id', (req, res) => {
+  const id = Number(req.params.id);
+  if (typeof req.body?.name === 'string') Workspaces.rename(id, req.body.name.trim() || 'workspace');
+  if ('pinned' in (req.body || {})) Workspaces.setPinned(id, !!req.body.pinned);
+  const ws = Workspaces.get(id);
+  emit('workspace.updated', { workspace: ws });
+  res.json(ws);
+});
+api.delete('/workspaces/:id', (req, res) => {
+  const id = Number(req.params.id);
+  for (const a of Agents.byWorkspace(id)) stopAgent(a.id);
+  Workspaces.remove(id);
+  emit('workspace.deleted', { id });
+  res.json({ ok: true });
+});
+api.get('/workspaces/:id/git', async (req, res) => {
+  const ws = Workspaces.get(Number(req.params.id));
+  if (!ws) return res.status(404).json({ error: 'not found' });
+  res.json(await gitSummary(ws.path, Number(req.query.limit) || 20));
+});
+api.get('/workspaces/:id/git/:hash', async (req, res) => {
+  const ws = Workspaces.get(Number(req.params.id));
+  if (!ws) return res.status(404).json({ error: 'not found' });
+  if (!/^[0-9a-f]{4,40}$/i.test(req.params.hash)) return res.status(400).json({ error: 'bad hash' });
+  res.type('text/plain').send(await gitCommitDiff(ws.path, req.params.hash));
+});
+api.get('/browse', (req, res) => {
+  // Folder picker helper for the phone: list subfolders of a path.
+  const p = req.query.path ? path.resolve(String(req.query.path)) : os.homedir();
+  try {
+    const entries = fs.readdirSync(p, { withFileTypes: true })
+      .filter((d) => d.isDirectory() && !d.name.startsWith('.') && d.name !== 'node_modules')
+      .map((d) => d.name)
+      .sort((a, b) => a.localeCompare(b));
+    res.json({ path: p, parent: path.dirname(p) !== p ? path.dirname(p) : null, dirs: entries });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+api.post('/agents', (req, res) => {
+  const { workspace_id, kind, name, model, effort, plan_effort, exec_effort, permission_mode, pipeline, triage_model, plan_model, exec_model, confirm_plan, collab_mode } = req.body || {};
+  const ws = Workspaces.get(Number(workspace_id));
+  if (!ws) return res.status(400).json({ error: 'workspace not found' });
+  const k = kind === 'codex' ? 'codex' : 'claude';
+  let agent = Agents.create(ws.id, k, name?.trim() || (k === 'codex' ? 'Codex' : 'Claude'));
+  const fields = {};
+  if (isModelAllowed('manual', model)) fields.model = model;
+  // A single "강도" chosen at creation applies to every stage until it is tuned per stage in the composer.
+  if (EFFORTS.includes(effort)) { fields.effort = effort; fields.plan_effort = effort; fields.exec_effort = effort; }
+  if (EFFORTS.includes(plan_effort)) fields.plan_effort = plan_effort;
+  if (EFFORTS.includes(exec_effort)) fields.exec_effort = exec_effort;
+  if (['ask', 'acceptEdits', 'auto'].includes(permission_mode)) fields.permission_mode = permission_mode;
+  if (['auto', 'manual'].includes(pipeline)) fields.pipeline = pipeline;
+  if (isModelAllowed('triage', triage_model)) fields.triage_model = triage_model;
+  if (isModelAllowed('plan', plan_model)) fields.plan_model = plan_model;
+  if (isModelAllowed('exec', exec_model)) fields.exec_model = exec_model;
+  if (confirm_plan !== undefined) fields.confirm_plan = confirm_plan ? 1 : 0;
+  if (collab_mode !== undefined) fields.collab_mode = collab_mode ? 1 : 0;
+  if (Object.keys(fields).length) agent = Agents.update(agent.id, fields);
+  emit('agent.updated', { agent: agentView(agent) });
+  res.json(agentView(agent));
+});
+api.get('/agents/:id', (req, res) => {
+  const a = Agents.get(Number(req.params.id));
+  if (!a) return res.status(404).json({ error: 'not found' });
+  res.json({
+    agent: agentView(a),
+    workspace: Workspaces.get(a.workspace_id),
+    messages: Messages.forAgent(a.id, Number(req.query.limit) || 300),
+    approvals: Approvals.pendingForAgent(a.id),
+  });
+});
+api.patch('/agents/:id', (req, res) => {
+  const id = Number(req.params.id);
+  const current = Agents.get(id);
+  if (!current) return res.status(404).json({ error: 'not found' });
+  if ('collab_mode' in (req.body || {}) && (isRunning(id) || current.status === 'working' || current.status === 'needs_attention')) {
+    return res.status(400).json({ error: '작업 또는 승인이 끝난 뒤 협업 모드를 바꾸세요' });
+  }
+  const fields = {};
+  if (typeof req.body?.name === 'string') fields.name = req.body.name.trim() || 'agent';
+  if (['ask', 'acceptEdits', 'auto'].includes(req.body?.permission_mode)) fields.permission_mode = req.body.permission_mode;
+  if ('model' in (req.body || {})) fields.model = isModelAllowed('manual', req.body.model) ? req.body.model : null;
+  if ('effort' in (req.body || {})) fields.effort = EFFORTS.includes(req.body.effort) ? req.body.effort : null;
+  if ('plan_effort' in (req.body || {})) fields.plan_effort = EFFORTS.includes(req.body.plan_effort) ? req.body.plan_effort : null;
+  if ('exec_effort' in (req.body || {})) fields.exec_effort = EFFORTS.includes(req.body.exec_effort) ? req.body.exec_effort : null;
+  if (['auto', 'manual'].includes(req.body?.pipeline)) fields.pipeline = req.body.pipeline;
+  if (isModelAllowed('triage', req.body?.triage_model)) fields.triage_model = req.body.triage_model;
+  if (isModelAllowed('plan', req.body?.plan_model)) fields.plan_model = req.body.plan_model;
+  if (isModelAllowed('exec', req.body?.exec_model)) fields.exec_model = req.body.exec_model;
+  if ('confirm_plan' in (req.body || {})) fields.confirm_plan = req.body.confirm_plan ? 1 : 0;
+  if ('auto_failover' in (req.body || {})) fields.auto_failover = req.body.auto_failover ? 1 : 0;
+  if ('collab_mode' in (req.body || {})) fields.collab_mode = req.body.collab_mode ? 1 : 0;
+  if (req.body?.reset_session) {
+    fields.session_id = null;
+    AgentSessions.clear(id);
+  }
+  const a = Agents.update(id, fields);
+  if (req.body?.clear_messages) Messages.clear(id);
+  emit('agent.updated', { agent: agentView(a) });
+  res.json(agentView(a));
+});
+api.delete('/agents/:id', (req, res) => {
+  const id = Number(req.params.id);
+  stopAgent(id);
+  Agents.remove(id);
+  emit('agent.deleted', { id });
+  res.json({ ok: true });
+});
+api.post('/agents/:id/prompt', (req, res) => {
+  const text = String(req.body?.text || '').trim();
+  if (!text) return res.status(400).json({ error: 'text required' });
+  try {
+    const a = startPrompt(Number(req.params.id), text, cfg);
+    res.json(agentView(a));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+api.post('/agents/:id/execute-plan', (req, res) => {
+  try {
+    res.json(agentView(executePlan(Number(req.params.id), cfg)));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+api.post('/agents/:id/switch-provider', (req, res) => {
+  try {
+    res.json(agentView(switchProvider(Number(req.params.id), req.body?.kind)));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+api.post('/agents/:id/stop', (req, res) => {
+  const id = Number(req.params.id);
+  const stopped = stopAgent(id);
+  res.json({ ok: stopped });
+});
+
+api.post('/approvals/:id', (req, res) => {
+  const { decision, message, updatedInput } = req.body || {};
+  if (!['allow', 'deny'].includes(decision)) return res.status(400).json({ error: 'decision must be allow|deny' });
+  const r = resolveApproval(Number(req.params.id), decision, { message, updatedInput });
+  if (!r) return res.status(404).json({ error: 'approval not pending' });
+  res.json(r);
+});
+
+api.post('/push/subscribe', (req, res) => {
+  const sub = req.body;
+  if (!sub?.endpoint) return res.status(400).json({ error: 'bad subscription' });
+  PushSubs.upsert(sub);
+  res.json({ ok: true });
+});
+api.post('/push/test', async (req, res) => {
+  await sendPush({ title: 'Agent Remote', body: '푸시 알림이 정상 동작합니다.', url: '/' });
+  res.json({ ok: true, subscriptions: PushSubs.all().length });
+});
+
+// Captured screenshots. <img> tags cannot send the bearer header, so the phone passes ?token=.
+api.get('/captures/:dir/:name', (req, res) => {
+  const { dir, name } = req.params;
+  if (!/^agent-\d+$/.test(dir) || !/^\d+\.png$/.test(name)) return res.status(400).end();
+  const p = path.join(CAPTURE_DIR, dir, name);
+  if (!fs.existsSync(p)) return res.status(404).end();
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  res.sendFile(p);
+});
+
+app.use('/api', api);
+
+// ---------- internal: screenshot requested by the agent's `capture` MCP tool ----------
+app.post('/internal/capture', requireInternal, async (req, res) => {
+  const { agentId, url, file, html, caption, width, height, full_page, wait_ms } = req.body || {};
+  const agent = Agents.get(Number(agentId));
+  if (!agent) return res.status(400).json({ error: 'unknown agent' });
+  const workspace = Workspaces.get(agent.workspace_id);
+  try {
+    const shot = await captureScreenshot({ agentId: agent.id, url, file, html, width, height, fullPage: !!full_page, waitMs: wait_ms, workspacePath: workspace?.path });
+    const m = Messages.add(agent.id, 'image', String(caption || '').trim() || '결과 화면', { file: shot.file, width: shot.width, height: shot.height, source: url || file || 'html' });
+    emit('message', { agent_id: agent.id, message: m });
+    res.json({ ok: true, ...shot });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// ---------- internal: approval long-poll from the MCP approver ----------
+app.post('/internal/approval', requireInternal, async (req, res) => {
+  const { agentId, toolName, input, approvalId } = req.body || {};
+  let id = approvalId;
+  let promise;
+  if (id) {
+    promise = waitForApproval(id);
+    if (!promise) return res.json({ result: { behavior: 'deny', message: 'approval expired' } });
+  } else {
+    const r = requestApproval(Number(agentId), toolName, input);
+    if (!r) return res.json({ result: { behavior: 'deny', message: 'unknown agent' } });
+    id = r.approval.id;
+    promise = r.promise;
+  }
+  const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 25_000));
+  const result = await Promise.race([promise, timeout]);
+  if (!result) return res.json({ pending: true, approvalId: id });
+  res.json({ result });
+});
+
+// ---------- static ----------
+// Phones (especially installed PWAs) happily reuse a stale style.css/app.js for days without an
+// explicit policy; make every static asset revalidate (ETag) on each load so UI updates land.
+app.use(express.static(PUBLIC_DIR, {
+  index: 'index.html',
+  extensions: ['html'],
+  setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache, must-revalidate'),
+}));
+
+// ---------- websocket ----------
+const server = http.createServer(app);
+const wss = new WebSocketServer({ noServer: true });
+server.on('upgrade', (req, socket, head) => {
+  const url = new URL(req.url, 'http://x');
+  if (url.pathname !== '/ws' || url.searchParams.get('token') !== cfg.token) {
+    socket.destroy();
+    return;
+  }
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+});
+wss.on('connection', (ws) => {
+  ws.send(JSON.stringify({ type: 'hello', running: runningIds(), ts: Date.now() }));
+});
+bus.on('event', (ev) => {
+  const data = JSON.stringify(ev);
+  for (const c of wss.clients) if (c.readyState === 1) c.send(data);
+});
+setInterval(() => {
+  for (const c of wss.clients) if (c.readyState === 1) c.ping();
+}, 30_000).unref();
+
+server.listen(cfg.port, '0.0.0.0', () => {
+  console.log(`Agent Remote listening on http://localhost:${cfg.port}`);
+  console.log(process.stdout.isTTY ? `Access token: ${cfg.token}` : 'Access token: stored in data/config.json');
+  console.log(`Claude binary: ${findClaudeBin()}`);
+  console.log(`Codex CLI: ${findCodexEntry() ? 'found' : 'not installed'}`);
+});

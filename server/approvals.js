@@ -1,0 +1,114 @@
+// Pending approval registry: the MCP approver (spawned by Claude) long-polls here,
+// the phone UI resolves via REST, and this module bridges the two.
+import { Approvals, Agents, Messages } from './db.js';
+import { emit } from './bus.js';
+import { sendPush } from './push.js';
+import { planPhase } from './state.js';
+
+const pending = new Map(); // approvalId -> { promise, resolve }
+const results = new Map(); // approvalId -> result (kept briefly for re-polls)
+
+export function summarizeInput(toolName, input) {
+  if (!input || typeof input !== 'object') return '';
+  if (toolName === 'Bash') return input.command || '';
+  if (['Write', 'Edit', 'Read', 'NotebookEdit'].includes(toolName)) return input.file_path || '';
+  if (toolName === 'AskUserQuestion') return (input.questions || []).map((q) => q.question).join(' / ');
+  const s = JSON.stringify(input);
+  return s.length > 300 ? s.slice(0, 300) + '…' : s;
+}
+
+export function requestApproval(agentId, toolName, input) {
+  const agent = Agents.get(agentId);
+  if (!agent) return null;
+
+  // ExitPlanMode carries the finished plan. Surface it in the UI. During the pipeline's planning
+  // run we deny it with a stop message, otherwise the same (planning-model) process would go on
+  // to implement; the execution model then resumes the session and carries out the plan.
+  if (toolName === 'ExitPlanMode') {
+    const plan = typeof input?.plan === 'string' ? input.plan.trim() : '';
+    if (plan) {
+      const m = Messages.add(agentId, 'plan', plan);
+      emit('message', { agent_id: agentId, message: m });
+    }
+    const approval = Approvals.create(agentId, toolName, input);
+    if (planPhase.has(agentId)) {
+      Approvals.resolve(approval.id, 'denied', 'plan recorded');
+      return {
+        approval,
+        promise: Promise.resolve({
+          behavior: 'deny',
+          message: '계획이 기록되었습니다. 이 턴에서는 구현하지 말고 한 문장으로 마무리한 뒤 멈추세요. 실행은 다음 지시에서 진행됩니다.',
+        }),
+      };
+    }
+    Approvals.resolve(approval.id, 'allowed', 'auto');
+    return { approval, promise: Promise.resolve({ behavior: 'allow', updatedInput: input }) };
+  }
+
+  const approval = Approvals.create(agentId, toolName, input);
+  let resolve;
+  const promise = new Promise((r) => (resolve = r));
+  pending.set(approval.id, { promise, resolve });
+
+  Agents.update(agentId, { status: 'needs_attention' });
+  Messages.add(agentId, 'system', `승인 요청 · ${toolName}: ${summarizeInput(toolName, input)}`, { approval_id: approval.id });
+  emit('approval.requested', { approval, agent: Agents.get(agentId) });
+  sendPush({
+    title: `${agent.name} · 승인 필요`,
+    body: `${toolName}: ${summarizeInput(toolName, input)}`.slice(0, 180),
+    url: `/?agent=${agentId}`,
+    tag: `approval-${approval.id}`,
+  }).catch(() => {});
+
+  return { approval, promise };
+}
+
+export function waitForApproval(id) {
+  if (results.has(id)) return Promise.resolve(results.get(id));
+  const p = pending.get(id);
+  return p ? p.promise : null;
+}
+
+export function resolveApproval(id, decision, extra = {}) {
+  const approval = Approvals.get(id);
+  if (!approval || approval.status !== 'pending') return null;
+  const status = decision === 'allow' ? 'allowed' : 'denied';
+  const updated = Approvals.resolve(id, status, extra.message || null);
+
+  const input = JSON.parse(approval.input_json);
+  let result;
+  if (decision === 'allow') {
+    const updatedInput = extra.updatedInput && typeof extra.updatedInput === 'object' ? extra.updatedInput : input;
+    result = { behavior: 'allow', updatedInput };
+  } else {
+    result = { behavior: 'deny', message: extra.message || '사용자가 휴대폰에서 거부했습니다.' };
+  }
+  finish(id, result);
+
+  const stillPending = Approvals.pendingForAgent(approval.agent_id).length > 0;
+  const agent = Agents.update(approval.agent_id, { status: stillPending ? 'needs_attention' : 'working' });
+  Messages.add(
+    approval.agent_id,
+    'system',
+    decision === 'allow' ? `승인함 · ${approval.tool_name}` : `거부함 · ${approval.tool_name}${extra.message ? ` (${extra.message})` : ''}`,
+    { approval_id: id }
+  );
+  emit('approval.resolved', { approval: updated, agent });
+  return updated;
+}
+
+function finish(id, result) {
+  const p = pending.get(id);
+  pending.delete(id);
+  results.set(id, result);
+  setTimeout(() => results.delete(id), 5 * 60 * 1000).unref();
+  if (p) p.resolve(result);
+}
+
+// Called when an agent process exits: nothing can consume pending decisions anymore.
+export function expireApprovals(agentId) {
+  for (const a of Approvals.pendingForAgent(agentId)) {
+    finish(a.id, { behavior: 'deny', message: 'Agent process ended' });
+  }
+  Approvals.expireForAgent(agentId);
+}

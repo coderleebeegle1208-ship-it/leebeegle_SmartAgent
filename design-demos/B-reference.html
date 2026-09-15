@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Remote — Direction B · Reference transfer · Linear Mobile</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+KR:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ---------- tokens (transferred from Linear's light theme grammar) ---------- */
+:root{
+  --bg:#FFFFFF;        /* page / row ground */
+  --surface:#F7F8F8;   /* group headers, composer, inputs */
+  --surface-2:#EEF0F2; /* pressed / bubble */
+  --line:#E6E8EB;      /* hairline separators */
+  --line-strong:#D5D8DC;
+  --ink:#0F1011;       /* primary text */
+  --ink-2:#3C3F44;
+  --ink-3:#6B6F76;     /* secondary text, 5.1:1 on white */
+  --ink-4:#8A8F98;     /* icons, decorative only */
+  --accent:#5E6AD2;    /* Linear indigo: primary action, done */
+  --accent-ink:#4A56B8;
+  --attn:#F2994A;      /* Linear "urgent" orange: the one loud color */
+  --attn-ink:#9A3E0F;  /* darkened for 7:1 text contrast */
+  --attn-bg:#FFF3E8;
+  --attn-line:#F5C7A2;
+  --ok:#4CB782;        /* connected / added */
+  --warn:#D9A521;      /* in progress / modified (darkened from #F2C94C) */
+  --danger:#B42318;
+  --sans:"Inter","Noto Sans KR","Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+  --mono:"JetBrains Mono","SFMono-Regular",Consolas,"Liberation Mono",monospace;
+  --r-s:6px; --r-m:8px; --r-l:12px;
+  --shadow:0 1px 2px rgba(15,16,17,.06),0 8px 24px rgba(15,16,17,.10);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{font-synthesis:none;line-break:strict;-webkit-font-smoothing:antialiased}
+body{
+  font-family:var(--sans);font-size:14px;line-height:1.5;color:var(--ink);
+  background:#E9EAED;padding:32px 40px 56px;min-height:100vh;
+}
+button,input,textarea{font:inherit;color:inherit;background:none;border:0}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums slashed-zero}
+.num{font-variant-numeric:tabular-nums}
+svg{display:block}
+
+/* ---------- page chrome ---------- */
+.page-head{
+  max-width:1310px;margin:0 auto 28px;background:#fff;border:1px solid var(--line);
+  border-radius:var(--r-l);padding:20px 24px;display:grid;grid-template-columns:1fr auto;gap:16px 32px;align-items:start;
+}
+.page-head h1{font-size:18px;font-weight:600;letter-spacing:-.01em;line-height:1.3}
+.page-head p{font-size:14px;color:var(--ink-3);margin-top:6px;max-width:64ch;text-wrap:pretty}
+.swatches{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;max-width:420px}
+.sw{display:flex;flex-direction:column;gap:6px;align-items:center;font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+.sw i{width:40px;height:40px;border-radius:var(--r-m);border:1px solid rgba(15,16,17,.08);display:block}
+.canvas{display:flex;gap:40px;justify-content:center;align-items:flex-start;overflow-x:auto;padding-bottom:8px}
+.col{flex:0 0 390px}
+.label{font-size:12px;font-weight:500;color:var(--ink-3);letter-spacing:.04em;text-transform:uppercase;font-family:var(--mono);margin:0 0 10px 2px}
+.label b{color:var(--ink);font-weight:500}
+
+/* ---------- phone frame ---------- */
+.phone{
+  width:390px;height:844px;overflow:hidden;position:relative;background:var(--bg);
+  border-radius:28px;box-shadow:0 0 0 1px rgba(15,16,17,.10),0 24px 60px rgba(15,16,17,.18);
+  display:flex;flex-direction:column;
+}
+.statusbar{height:28px;flex:0 0 28px;display:flex;align-items:center;justify-content:space-between;padding:0 24px;font-size:12px;font-weight:500;color:var(--ink-2)}
+.statusbar .sig{display:flex;gap:4px;align-items:flex-end}
+.statusbar .sig i{width:3px;background:var(--ink-2);border-radius:1px;display:block}
+
+/* top bar */
+.topbar{height:52px;flex:0 0 52px;display:flex;align-items:center;gap:8px;padding:0 8px 0 16px;border-bottom:1px solid var(--line)}
+.topbar .title{flex:1;font-size:16px;font-weight:600;letter-spacing:-.01em;display:flex;align-items:center;gap:10px;min-width:0}
+.topbar .title span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(76,183,130,.18);flex:0 0 8px}
+.ib{width:44px;height:44px;display:grid;place-items:center;border-radius:var(--r-m);color:var(--ink-2)}
+.ib:active{background:var(--surface-2)}
+
+/* generic list row */
+.row{display:grid;grid-template-columns:24px 1fr auto;gap:12px;align-items:start;padding:12px 16px;min-height:44px;border-bottom:1px solid var(--line);background:var(--bg)}
+.row .g{padding-top:2px}
+.row .t{display:flex;align-items:center;gap:8px;min-width:0}
+.row .t strong{font-size:15px;font-weight:500;letter-spacing:-.005em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .s{font-size:14px;color:var(--ink-3);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.45}
+.row .m{font-size:12px;color:var(--ink-3);padding-top:3px;white-space:nowrap}
+.row.attn{background:var(--attn-bg)}
+.row.attn .s{color:var(--attn-ink);font-weight:500}
+.kind{font-family:var(--mono);font-size:11px;font-weight:500;letter-spacing:.06em;color:var(--ink-3);background:var(--surface-2);padding:2px 6px;border-radius:4px;line-height:1.3;flex:0 0 auto}
+.kind.claude{color:var(--accent-ink);background:#ECEEFA}
+.kind.codex{color:#2A5A44;background:#E6F4EC}
+.state{font-size:12px;color:var(--ink-3);white-space:nowrap}
+.state.attn{color:var(--attn-ink);font-weight:600}
+
+/* section header (Linear grouped list) */
+.sect{display:flex;align-items:center;gap:8px;padding:0 8px 0 16px;height:48px;background:var(--surface);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.sect .n{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center}
+.sect .n strong{font-size:14px;font-weight:600;letter-spacing:-.005em;line-height:1.3}
+.sect .n small{font-family:var(--mono);font-size:11px;color:var(--ink-3);line-height:1.3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb{height:44px;padding:0 10px;display:inline-flex;align-items:center;gap:4px;font-size:13px;font-weight:500;color:var(--ink-2);border-radius:var(--r-s)}
+.tb:active{background:var(--surface-2)}
+
+/* home: computer strip */
+.pc{display:grid;grid-template-columns:1fr auto;gap:2px 16px;padding:14px 16px 12px;border-bottom:1px solid var(--line)}
+.pc .h{font-size:15px;font-weight:600;letter-spacing:-.01em;display:flex;align-items:center;gap:8px}
+.pc .h em{font-style:normal;font-weight:500;font-size:12px;color:#2A6E4E;background:#E6F4EC;padding:2px 7px;border-radius:999px}
+.pc .stat{grid-column:2;grid-row:1/3;align-self:center;font-family:var(--mono);font-size:12px;color:var(--ink-3);display:flex;gap:12px}
+.pc .stat b{color:var(--ink);font-weight:500}
+.pc .sub{font-size:12px;color:var(--ink-3)}
+
+/* home: filter rail */
+.rail{display:flex;gap:6px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--bg)}
+.chip{height:36px;padding:0 11px;border-radius:999px;border:1px solid var(--line-strong);display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:500;color:var(--ink-2);white-space:nowrap;flex:0 0 auto}
+.chip b{font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+.chip.on{background:var(--ink);border-color:var(--ink);color:#fff}
+.chip.on b{color:#fff}
+.chip.attn{border-color:var(--attn);color:var(--attn-ink);background:var(--attn-bg)}
+.chip.attn b{color:var(--attn-ink)}
+
+/* fab */
+.fab{position:absolute;right:16px;bottom:24px;width:56px;height:56px;border-radius:16px;background:var(--accent);color:#fff;display:grid;place-items:center;box-shadow:0 6px 16px rgba(94,106,210,.35),0 1px 2px rgba(15,16,17,.2)}
+
+/* status glyphs */
+.gl{width:18px;height:18px;border-radius:50%}
+.gl.attn{background:var(--attn);color:#fff}
+.gl.done{background:var(--accent);color:#fff}
+.gl.run{color:var(--warn)}
+
+/* ---------- detail ---------- */
+.meta{padding:12px 16px 12px;border-bottom:1px solid var(--line)}
+.badges{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.badge{height:26px;padding:0 9px;border-radius:999px;display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;border:1px solid var(--line-strong);color:var(--ink-2)}
+.badge.attn{border-color:var(--attn);background:var(--attn-bg);color:var(--attn-ink);font-weight:600}
+.badge.attn i{width:8px;height:8px;border-radius:50%;background:var(--attn)}
+.path{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-top:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+.approve{margin:12px 16px 4px;background:var(--attn-bg);border:1px solid var(--attn-line);border-radius:var(--r-l);padding:14px 14px 12px;box-shadow:0 1px 0 rgba(154,62,15,.06)}
+.approve .k{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--attn-ink);letter-spacing:.02em}
+.approve .k .gl{width:16px;height:16px}
+.approve h2{font-size:17px;font-weight:600;letter-spacing:-.01em;margin-top:6px;line-height:1.35}
+.cmd{margin-top:10px;background:#fff;border:1px solid var(--attn-line);border-radius:var(--r-m);padding:10px 12px;font-family:var(--mono);font-size:13px;color:var(--ink);display:flex;gap:8px;align-items:center;overflow:hidden}
+.cmd i{color:var(--ink-4);font-style:normal;flex:0 0 auto}
+.cmd span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.reason{margin-top:10px;height:44px;border:1px solid var(--line-strong);background:#fff;border-radius:var(--r-m);padding:0 12px;font-size:14px;color:var(--ink-4);display:flex;align-items:center}
+.btns{display:grid;grid-template-columns:1fr 1.4fr;gap:8px;margin-top:10px}
+.btn{height:44px;border-radius:var(--r-m);display:inline-flex;align-items:center;justify-content:center;gap:6px;font-size:15px;font-weight:600;letter-spacing:-.005em}
+.btn.ghost{border:1px solid var(--line-strong);background:#fff;color:var(--ink-2)}
+.btn.primary{background:var(--accent);color:#fff;box-shadow:inset 0 1px 0 rgba(255,255,255,.18)}
+
+.stream{flex:1;overflow:hidden;padding:10px 16px 0;display:flex;flex-direction:column;gap:10px}
+.day{font-size:11px;color:var(--ink-3);text-align:center;font-family:var(--mono);letter-spacing:.04em}
+.bub{align-self:flex-end;max-width:82%;background:var(--surface-2);border-radius:14px 14px 4px 14px;padding:9px 12px;font-size:14px;line-height:1.55;color:var(--ink)}
+.asst{font-size:14px;line-height:1.6;color:var(--ink);padding-right:12px;text-wrap:pretty}
+.tool{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12px;color:var(--ink-2);height:24px}
+.tool i{width:16px;height:16px;display:grid;place-items:center;color:var(--ink-4)}
+.tool b{font-weight:500;color:var(--ink-3)}
+.tres{font-family:var(--mono);font-size:12px;color:var(--ink-3);background:var(--surface);border-radius:var(--r-s);padding:6px 10px;margin-left:24px}
+.sys{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--attn-ink);font-weight:500;padding:6px 0 0}
+.sys i{width:6px;height:6px;border-radius:50%;background:var(--attn)}
+.sys code{font-family:var(--mono);font-weight:400;font-size:12px;color:var(--attn-ink)}
+
+.composer{flex:0 0 auto;border-top:1px solid var(--line);padding:10px 12px 16px;display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end;background:var(--bg)}
+.ta{min-height:44px;border:1px solid var(--line-strong);border-radius:var(--r-l);padding:11px 14px;font-size:15px;color:var(--ink-4);background:var(--surface)}
+.stop{height:44px;padding:0 14px;border-radius:var(--r-l);border:1px solid var(--line-strong);display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:600;color:var(--ink)}
+.stop i{width:10px;height:10px;background:var(--danger);border-radius:2px}
+
+/* ---------- commits ---------- */
+.wshead{padding:14px 16px 12px;border-bottom:1px solid var(--line)}
+.wshead .path{margin-top:0}
+.wshead .br{margin-top:6px;font-size:14px;color:var(--ink-2);display:flex;align-items:center;gap:8px}
+.wshead .br b{font-weight:500;font-family:var(--mono);font-size:13px;color:var(--ink)}
+.sh{height:40px;display:flex;align-items:center;padding:0 16px;font-size:12px;font-weight:600;color:var(--ink-3);letter-spacing:.02em;background:var(--surface);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.sh .cnt{margin-left:auto;font-weight:500;font-family:var(--mono);color:var(--ink-4)}
+.frow{display:grid;grid-template-columns:24px 1fr;gap:12px;align-items:center;height:48px;padding:0 16px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:13px}
+.frow .st{width:22px;height:22px;border-radius:5px;display:grid;place-items:center;font-size:11px;font-weight:600}
+.frow .st.M{background:#FBF0D0;color:#7A5A06}
+.frow .st.A{background:#E6F4EC;color:#1F6B47}
+.crow{display:grid;grid-template-columns:1fr auto;gap:2px 12px;padding:11px 16px;border-bottom:1px solid var(--line);min-height:56px;align-items:center}
+.crow .h{font-family:var(--mono);font-size:12px;color:var(--ink-3);grid-row:1}
+.crow .msg{font-size:14px;font-weight:500;color:var(--ink);grid-row:2;letter-spacing:-.005em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.crow .when{grid-column:2;grid-row:1/3;font-size:12px;color:var(--ink-3);white-space:nowrap}
+.actions{margin-top:auto;border-top:1px solid var(--line);padding:8px 0 20px}
+.arow{height:48px;display:flex;align-items:center;gap:12px;padding:0 16px;font-size:15px;font-weight:500;color:var(--ink);width:100%;text-align:left}
+.arow.danger{color:var(--danger)}
+.arow svg{color:var(--ink-4)}
+.arow.danger svg{color:inherit}
+.arow .chev{margin-left:auto}
+</style>
+</head>
+<body>
+
+<header class="page-head">
+  <div>
+    <h1>Direction B · Reference transfer · Linear Mobile (iOS/Android, 2025 redesign)</h1>
+    <p>Linear's phone app is the closest existing benchmark: a dense, hairline-separated work list built for away-from-keyboard triage, where color is withheld everywhere except the one item that needs a decision. That grammar — grouped rows, tabular meta, indigo for action, orange only for urgency — is transferred here; no brand assets are copied.</p>
+  </div>
+  <div class="swatches">
+    <div class="sw"><i style="background:#FFFFFF"></i>FFFFFF</div>
+    <div class="sw"><i style="background:#F7F8F8"></i>F7F8F8</div>
+    <div class="sw"><i style="background:#E6E8EB"></i>E6E8EB</div>
+    <div class="sw"><i style="background:#0F1011"></i>0F1011</div>
+    <div class="sw"><i style="background:#6B6F76"></i>6B6F76</div>
+    <div class="sw"><i style="background:#5E6AD2"></i>5E6AD2</div>
+    <div class="sw"><i style="background:#F2994A"></i>F2994A</div>
+    <div class="sw"><i style="background:#9A3E0F"></i>9A3E0F</div>
+    <div class="sw"><i style="background:#4CB782"></i>4CB782</div>
+    <div class="sw"><i style="background:#B42318"></i>B42318</div>
+  </div>
+</header>
+
+<main class="canvas">
+
+<!-- ===================== SCREEN 1 · HOME ===================== -->
+<section class="col">
+  <p class="label"><b>01</b> Home</p>
+  <div class="phone">
+    <div class="statusbar"><span class="num">9:41</span><span class="sig"><i style="height:4px"></i><i style="height:6px"></i><i style="height:8px"></i><i style="height:10px"></i></span></div>
+
+    <div class="topbar">
+      <div class="title"><span class="dot" aria-label="연결됨"></span><span>Agent Remote</span></div>
+      <button class="ib" aria-label="새로고침"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></button>
+      <button class="ib" aria-label="설정"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2.5"/><circle cx="10" cy="17" r="2.5"/></svg></button>
+    </div>
+
+    <div class="pc">
+      <div class="h">leebeegle <em>Connected</em></div>
+      <div class="sub">Windows PC · 마지막 동기화 방금</div>
+      <div class="stat"><span>CPU <b>12%</b></span><span>RAM <b>41%</b></span></div>
+    </div>
+
+    <div class="rail">
+      <span class="chip on">전체 <b>6</b></span>
+      <span class="chip attn">승인 필요 <b>1</b></span>
+      <span class="chip">작업 중 <b>2</b></span>
+      <span class="chip">완료 <b>3</b></span>
+    </div>
+
+    <div class="sect">
+      <div class="n"><strong>herdr-frontend</strong><small>~/Documents/Programming/herdr-frontend</small></div>
+      <button class="tb">커밋</button>
+      <button class="tb"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>에이전트</button>
+    </div>
+
+    <div class="row attn">
+      <div class="g"><svg class="gl attn" width="18" height="18" viewBox="0 0 18 18"><circle cx="9" cy="9" r="9" fill="#F2994A"/><path d="M9 4.5v5.2" stroke="#fff" stroke-width="2" stroke-linecap="round"/><circle cx="9" cy="13" r="1.15" fill="#fff"/></svg></div>
+      <div>
+        <div class="t"><span class="kind claude">CLAUDE</span><strong>리팩터링</strong><span class="state attn">승인 필요</span></div>
+        <div class="s">npm test 실행 승인이 필요합니다</div>
+      </div>
+      <div class="m">방금</div>
+    </div>
+
+    <div class="row">
+      <div class="g"><svg class="gl run" width="18" height="18" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7.5" fill="none" stroke="#D9A521" stroke-width="1.6"/><path d="M9 3.6A5.4 5.4 0 0 1 14.4 9L9 9z" fill="#D9A521"/></svg></div>
+      <div>
+        <div class="t"><span class="kind codex">CODEX</span><strong>문서 정리</strong><span class="state">작업 중</span></div>
+        <div class="s">README의 설치 절차를 다시 쓰는 중입니다…</div>
+      </div>
+      <div class="m">3분 전</div>
+    </div>
+
+    <div class="row">
+      <div class="g"><svg class="gl done" width="18" height="18" viewBox="0 0 18 18"><circle cx="9" cy="9" r="9" fill="#5E6AD2"/><path d="M5.3 9.2l2.5 2.5 4.9-5" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <div>
+        <div class="t"><span class="kind claude">CLAUDE</span><strong>버그 수정</strong><span class="state">완료</span></div>
+        <div class="s">로그인 폼의 빈 값 검증을 추가하고 테스트 3개를 통과시켰습니다.</div>
+      </div>
+      <div class="m">11분 전</div>
+    </div>
+
+    <div class="sect">
+      <div class="n"><strong>youtube-shorts</strong><small>~/Documents/Programming/youtube-shorts</small></div>
+      <button class="tb">커밋</button>
+      <button class="tb"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>에이전트</button>
+    </div>
+
+    <div class="row">
+      <div class="g"><svg class="gl done" width="18" height="18" viewBox="0 0 18 18"><circle cx="9" cy="9" r="9" fill="#5E6AD2"/><path d="M5.3 9.2l2.5 2.5 4.9-5" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <div>
+        <div class="t"><span class="kind claude">CLAUDE</span><strong>자막 생성기</strong><span class="state">완료</span></div>
+        <div class="s">자막 SRT 12개를 생성했습니다.</div>
+      </div>
+      <div class="m">1시간 전</div>
+    </div>
+
+    <button class="fab" aria-label="워크스페이스 추가"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
+  </div>
+</section>
+
+<!-- ===================== SCREEN 2 · AGENT DETAIL ===================== -->
+<section class="col">
+  <p class="label"><b>02</b> Agent detail · 리팩터링</p>
+  <div class="phone">
+    <div class="statusbar"><span class="num">9:41</span><span class="sig"><i style="height:4px"></i><i style="height:6px"></i><i style="height:8px"></i><i style="height:10px"></i></span></div>
+
+    <div class="topbar" style="padding-left:4px">
+      <button class="ib" aria-label="뒤로"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button>
+      <div class="title"><span>리팩터링</span></div>
+      <button class="ib" aria-label="더 보기"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg></button>
+    </div>
+
+    <div class="meta">
+      <div class="badges">
+        <span class="badge"><span class="kind claude" style="padding:0;background:none">CLAUDE</span></span>
+        <span class="badge attn"><i></i>승인 필요</span>
+        <span class="badge">매번 승인</span>
+      </div>
+      <div class="path">~/Documents/Programming/herdr-frontend</div>
+    </div>
+
+    <div class="approve">
+      <div class="k"><svg class="gl" width="16" height="16" viewBox="0 0 18 18"><circle cx="9" cy="9" r="9" fill="#F2994A"/><path d="M9 4.5v5.2" stroke="#fff" stroke-width="2" stroke-linecap="round"/><circle cx="9" cy="13" r="1.15" fill="#fff"/></svg>승인 필요 · 방금</div>
+      <h2>Bash 실행 승인</h2>
+      <div class="cmd"><i>$</i><span>npm test -- --coverage</span></div>
+      <div class="reason">거부 사유 (선택)</div>
+      <div class="btns">
+        <button class="btn ghost">거부</button>
+        <button class="btn primary">허용</button>
+      </div>
+    </div>
+
+    <div class="stream">
+      <div class="day">오늘 · 14:02</div>
+      <div class="bub">auth 모듈 테스트 커버리지 80% 이상으로 올려줘</div>
+      <div class="asst">현재 커버리지는 62%입니다. 누락된 분기 4개에 테스트를 추가하겠습니다.</div>
+      <div class="tool"><i><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5"/></svg></i><b>Read</b> src/auth/login.ts</div>
+      <div class="tool"><i><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-4-4L4 16z"/></svg></i><b>Edit</b> tests/auth.test.ts</div>
+      <div class="tres">Tests: 12 passed, 0 failed</div>
+      <div class="sys"><i></i>승인 요청 · <code>Bash: npm test -- --coverage</code></div>
+    </div>
+
+    <div class="composer">
+      <div class="ta">지시를 입력하세요…</div>
+      <button class="stop"><i></i>중지</button>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== SCREEN 3 · WORKSPACE COMMITS ===================== -->
+<section class="col">
+  <p class="label"><b>03</b> Workspace · herdr-frontend</p>
+  <div class="phone">
+    <div class="statusbar"><span class="num">9:41</span><span class="sig"><i style="height:4px"></i><i style="height:6px"></i><i style="height:8px"></i><i style="height:10px"></i></span></div>
+
+    <div class="topbar" style="padding-left:4px">
+      <button class="ib" aria-label="뒤로"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button>
+      <div class="title"><span>herdr-frontend</span></div>
+      <button class="ib" aria-label="새로고침"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></button>
+    </div>
+
+    <div class="wshead">
+      <div class="path">~/Documents/Programming/herdr-frontend</div>
+      <div class="br"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8A8F98" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="8" r="2.5"/><path d="M6 7.5v9M18 10.5c0 4-12 2-12 6"/></svg>브랜치 <b>main</b> · 변경 파일 2개</div>
+    </div>
+
+    <div class="sh">커밋 안 된 변경 <span class="cnt">2</span></div>
+    <div class="frow"><span class="st M">M</span><span>src/auth/login.ts</span></div>
+    <div class="frow"><span class="st A">A</span><span>tests/auth.test.ts</span></div>
+
+    <div class="sh">최근 커밋</div>
+    <div class="crow"><span class="h">a91f2c3</span><span class="msg">auth: add empty-value validation</span><span class="when">11분 전</span></div>
+    <div class="crow"><span class="h">5d0e77b</span><span class="msg">docs: rewrite install steps</span><span class="when">2시간 전</span></div>
+    <div class="crow"><span class="h">300c9a9</span><span class="msg">init</span><span class="when">어제</span></div>
+
+    <div class="actions">
+      <button class="arow"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-4-4L4 16z"/></svg>이름 변경<svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
+      <button class="arow danger"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>워크스페이스 삭제</button>
+    </div>
+  </div>
+</section>
+
+</main>
+</body>
+</html>
