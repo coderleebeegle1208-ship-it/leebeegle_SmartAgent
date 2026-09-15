@@ -34,6 +34,10 @@ export function loadConfig() {
     cfg.subagentModel = 'haiku'; // set to "" to let subagents use the main model
     changed = true;
   }
+  if (cfg.compactAfterTokens === undefined) {
+    cfg.compactAfterTokens = 300_000; // context size (tokens read per turn) that triggers 대화 정리; 0 = off
+    changed = true;
+  }
   if (!cfg.pushSubject) {
     cfg.pushSubject = 'mailto:admin@localhost';
     changed = true;

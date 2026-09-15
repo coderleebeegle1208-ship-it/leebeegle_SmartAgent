@@ -77,6 +77,31 @@ export function runClaudeOnce({ cwd, prompt, model = 'haiku', schema, cfg, onMod
   });
 }
 
+/** One-shot, tool-less call that returns the model's text (used for 대화 정리 summaries). */
+export function runClaudeOnceText({ cwd, prompt, model = 'haiku', cfg, timeoutMs = 90_000 }) {
+  return new Promise((resolve) => {
+    const args = ['-p', '--output-format', 'json', '--model', model, '--max-turns', '1', '--disallowedTools', '*', '--permission-mode', 'dontAsk'];
+    const child = spawn(findClaudeBin(), args, { cwd, env: cleanClaudeEnv(cfg), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', () => {});
+    child.stdin.on('error', () => {});
+    child.stdin.end(prompt);
+    const timer = setTimeout(() => { try { child.kill(); } catch {} }, timeoutMs);
+    child.on('error', () => { clearTimeout(timer); resolve(null); });
+    child.on('close', () => {
+      clearTimeout(timer);
+      try {
+        const j = JSON.parse(out);
+        resolve(j.is_error ? null : String(j.result || '').trim() || null);
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
 function summarizeToolUse(name, input) {
   if (!input) return name;
   if (name === 'Bash') return `$ ${input.command || ''}`;

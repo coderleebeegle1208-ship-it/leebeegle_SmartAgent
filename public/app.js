@@ -1008,6 +1008,12 @@
     if (act === 'rename') {
       const name = prompt('새 이름', a.name);
       if (name) await api(`/agents/${a.id}`, { method: 'PATCH', body: { name } });
+    } else if (act === 'compact') {
+      if (confirm('지금까지의 대화를 짧게 요약해 두고 새 대화로 이어갑니다. 토큰 사용이 크게 줄어듭니다. 진행할까요?')) {
+        toast('요약하는 중…');
+        try { await api(`/agents/${a.id}/compact`, { method: 'POST' }); toast('대화를 정리했습니다'); loadDetail(a.id, true); }
+        catch (e) { toast(e.message); }
+      }
     } else if (act === 'reset') {
       if (confirm('세션을 초기화할까요? 이전 대화 맥락이 사라집니다.')) await api(`/agents/${a.id}`, { method: 'PATCH', body: { reset_session: true } });
     } else if (act === 'clear') {

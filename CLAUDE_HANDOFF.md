@@ -160,6 +160,15 @@
 - 집계 중복 수정: Claude가 한 프로세스에서 `result` 이벤트를 여러 번 내면(토큰은 구간별, cost는 누적) 행이 5개씩 생기던 것을 한 행으로 합산(토큰 합, cost는 마지막 값), 0토큰 행은 버린다. 모델 라벨은 init 이벤트의 메인 모델을 우선하고 `modelUsage`에서는 비용이 가장 큰 키를 고른다(서브에이전트 Haiku가 라벨을 가로채던 문제).
 - 남은 절약 포인트: 실행 단계가 매번 메인 세션 전체(1M 토큰 캐시 읽기)를 읽는다. 대화가 길어질수록 커지므로 `대화 초기화`(reset_session)를 주기적으로 쓰거나 자동 요약 기준을 두는 것이 다음 과제.
 
+## 추가 완료 (2026-09-15, 대화 정리)
+
+- `compactAgent(agentId, cfg, {reason})`(runners/index.js): 최근 80개 메시지를 `compactConversation`(14000자)으로 압축 → 판단 모델(Haiku)로 "이어가기 메모"(목표/한 일/결정/남은 일/주의, 700자 이내) 생성 → Claude 세션 제거·`session_id` null·`carry_note`에 메모 저장·`context_tokens` 0 → `handoff` 메시지 + system 노트. 정리 중에는 `compacting` Set으로 새 지시를 막는다.
+- `runTurn`: main 세션(fresh 아님)에 저장된 세션이 없고 `carry_note`가 있으면 프롬프트 앞에 `[이전 대화 요약 · 이어서 진행]`으로 붙이고 즉시 비운다. 계획 단계(fresh)는 `compactConversation`이 `handoff` 역할도 포함하도록 해 메모를 본다.
+- 자동 기준: 각 main 턴의 `input + cacheRead + cacheWrite`를 `agents.context_tokens`에 기록하고, `finish()` 성공 시 `cfg.compactAfterTokens`(기본 300000, 0=끔)를 넘으면 500ms 뒤 자동 정리.
+- 수동: `POST /api/agents/:id/compact`, 에이전트 메뉴 `대화 정리 (요약해 두고 새 대화로)`. 기존 `새 세션으로 시작`은 요약 없는 초기화로 남겼다.
+- 검증(agent 6): 정리 14초, 메모 754자. 다음 질문에 파일을 열지 않고 메모만으로 정확히 답했고, 그 턴의 읽기 양은 1.03M → 37k 토큰(환산 $0.565 → $0.06).
+- `runClaudeOnceText`(claude.js): 도구 없는 1턴 호출로 텍스트를 돌려주는 헬퍼.
+
 ## 변경한 파일
 
 - `server/db.js`

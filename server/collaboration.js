@@ -11,7 +11,7 @@ export function otherProvider(kind) {
 
 export function compactConversation(messages, maxChars = 6000) {
   const eligible = (messages || [])
-    .filter((m) => ['user', 'assistant', 'plan'].includes(m.role))
+    .filter((m) => ['user', 'assistant', 'plan', 'handoff'].includes(m.role))
     .map((m) => `${ROLE_LABEL[m.role]}: ${String(m.content || '').trim()}`)
     .filter((line) => line.length > 4);
   const selected = [];

@@ -12,7 +12,7 @@ import { bus, emit } from './bus.js';
 import { initPush, sendPush } from './push.js';
 import { gitSummary, gitCommitDiff, gitRemote, setGitRemote } from './git.js';
 import { requestApproval, waitForApproval, resolveApproval } from './approvals.js';
-import { startPrompt, stopAgent, isRunning, runningIds, executePlan, switchProvider } from './runners/index.js';
+import { startPrompt, stopAgent, isRunning, runningIds, executePlan, switchProvider, compactAgent } from './runners/index.js';
 import { findClaudeBin } from './runners/claude.js';
 import { findCodexEntry } from './runners/codex.js';
 import { getUsage } from './usage.js';
@@ -275,6 +275,14 @@ api.post('/agents/:id/prompt', (req, res) => {
   try {
     const a = startPrompt(Number(req.params.id), text, cfg);
     res.json(agentView(a));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+api.post('/agents/:id/compact', async (req, res) => {
+  try {
+    await compactAgent(Number(req.params.id), cfg, { reason: 'manual' });
+    res.json(agentView(Agents.get(Number(req.params.id))));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }

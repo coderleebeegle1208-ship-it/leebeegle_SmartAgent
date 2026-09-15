@@ -8,7 +8,7 @@ import { AgentSessions, Agents, Messages, Workspaces } from '../db.js';
 import { emit } from '../bus.js';
 import { sendPush } from '../push.js';
 import { expireApprovals } from '../approvals.js';
-import { runClaude, runClaudeOnce } from './claude.js';
+import { runClaude, runClaudeOnce, runClaudeOnceText } from './claude.js';
 import { findCodexEntry, runCodex } from './codex.js';
 import { planPhase } from '../state.js';
 import { modelLabel } from '../models.js';
@@ -95,6 +95,11 @@ function runTurn(agentId, text, cfg, opts = {}) {
     }
     // A one-off run (the planner) starts a fresh session and must not become the agent's session.
     if (opts.fresh) savedSession = null;
+    // First turn after 대화 정리: hand the summary to the new session, then forget it.
+    if (!opts.fresh && !savedSession && agent.carry_note) {
+      text = `[이전 대화 요약 · 이어서 진행]\n${agent.carry_note}\n\n${text}`;
+      Agents.update(agentId, { carry_note: null });
+    }
     const runtimeModel = Object.hasOwn(opts, 'model') ? opts.model : provider === 'codex' ? null : agent.model;
     const runtimeAgent = { ...agent, kind: provider, session_id: savedSession, model: runtimeModel };
     let result = null;
@@ -138,6 +143,10 @@ function runTurn(agentId, text, cfg, opts = {}) {
               ...usage,
             };
             pushUsage(agentId, usageRow);
+          }
+          // What the main session had to read this turn ≈ how big the conversation has grown.
+          if (!opts.fresh && provider === 'claude' && Agents.get(agentId)) {
+            Agents.update(agentId, { context_tokens: (usageRow.input || 0) + (usageRow.cacheRead || 0) + (usageRow.cacheWrite || 0) });
           }
         }
         if (r.session_id && !opts.fresh && Agents.get(agentId)) {
@@ -408,11 +417,61 @@ async function runPipeline(agentId, text, cfg, flow = { allowFailover: true }) {
   return completeOrFailover(agentId, execRun, text, cfg, flow.allowFailover !== false);
 }
 
+const COMPACT_LABEL = '대화 정리';
+const compacting = new Set(); // agentIds whose summary is being written; new prompts wait
+
+/**
+ * 대화 정리: summarize the conversation with the cheap triage model, store the memo, and drop the
+ * Claude session so the next turn starts small. Reading a 1M-token history every turn is the
+ * single biggest cost once an agent has been used for a while.
+ */
+export async function compactAgent(agentId, cfg, { reason = 'manual' } = {}) {
+  const agent = Agents.get(agentId);
+  if (!agent) throw new Error('agent not found');
+  if (live.has(agentId) || agent.status === 'working') throw new Error('작업이 끝난 뒤 정리하세요');
+  if (compacting.has(agentId)) throw new Error('이미 정리 중입니다');
+  const history = compactConversation(Messages.forAgent(agentId, 80), 14000);
+  if (!history.trim()) throw new Error('정리할 대화가 없습니다');
+  compacting.add(agentId);
+  try {
+    return await compactAgentInner(agentId, agent, history, cfg, reason);
+  } finally {
+    compacting.delete(agentId);
+  }
+}
+
+async function compactAgentInner(agentId, agent, history, cfg, reason) {
+  const prompt = `아래는 코딩 에이전트와 사용자의 대화 기록이다. 다음 대화가 새 세션에서 시작되어도 이어갈 수 있도록 한국어로 "이어가기 메모"를 써라.
+형식: 줄머리 "- "로 시작하는 짧은 항목만. 섹션: 목표 / 지금까지 한 일 / 결정한 것 / 남은 일 / 주의할 점. 전체 700자 이내. 파일 이름·명령은 필요할 때만.
+
+${history}`;
+  const memo = await runClaudeOnceText({ cwd: TRIAGE_DIR, prompt, model: agent.triage_model || 'haiku', cfg });
+  if (!memo) throw new Error('요약 생성에 실패했습니다');
+  AgentSessions.remove(agentId, 'claude');
+  const fields = { carry_note: memo, context_tokens: 0 };
+  if (agent.kind === 'claude') fields.session_id = null;
+  update(agentId, fields);
+  const m = Messages.add(agentId, 'handoff', `${COMPACT_LABEL} · 이어가기 메모\n${memo}`, { compact: true, reason });
+  emit('message', { agent_id: agentId, message: m });
+  note(agentId, reason === 'auto'
+    ? `${COMPACT_LABEL} · 대화가 길어져 요약해 두고 새 대화로 이어갑니다`
+    : `${COMPACT_LABEL} · 요약해 두고 새 대화로 이어갑니다`);
+  return memo;
+}
+
+function maybeAutoCompact(agentId, cfg) {
+  const limit = Number(cfg?.compactAfterTokens) || 0;
+  const agent = Agents.get(agentId);
+  if (!limit || !agent || agent.kind !== 'claude' || agent.context_tokens < limit) return;
+  compactAgent(agentId, cfg, { reason: 'auto' }).catch((e) => note(agentId, `${COMPACT_LABEL} 실패 · ${e.message}`));
+}
+
 function finish(agentId, r, opts = {}) {
   flushUsage(agentId);
   const agent = Agents.get(agentId);
   if (!agent) return;
   if (!r) return;
+  if (r.ok) setTimeout(() => maybeAutoCompact(agentId, opts.cfg || lastCfg), 500);
   const ok = !!r.ok;
   if (!ok) {
     const errorText = r.text || r.subtype || '문제가 발생했습니다.';
@@ -433,10 +492,13 @@ function finish(agentId, r, opts = {}) {
   return r;
 }
 
+let lastCfg = null;
 export function startPrompt(agentId, text, cfg) {
+  lastCfg = cfg;
   const agent = Agents.get(agentId);
   if (!agent) throw new Error('agent not found');
   if (live.has(agentId) || agent.status === 'working') throw new Error('이미 작업 중입니다');
+  if (compacting.has(agentId)) throw new Error('대화를 정리하는 중입니다. 잠시 후 다시 보내세요');
   if (!Workspaces.get(agent.workspace_id)) throw new Error('workspace not found');
   if (agent.collab_mode && !findCodexEntry()) throw new Error('교차 협업에는 Codex CLI가 필요합니다');
 

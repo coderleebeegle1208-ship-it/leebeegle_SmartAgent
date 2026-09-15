@@ -75,6 +75,8 @@ for (const [table, col, def] of [
   ['agents', 'plan_effort', 'TEXT'],                          // null → 'high'
   ['agents', 'exec_effort', 'TEXT'],                          // null → CLI default
   ['agents', 'resolved_models', 'TEXT'],                      // JSON: stage → concrete model id last used
+  ['agents', 'context_tokens', 'INTEGER NOT NULL DEFAULT 0'],  // tokens the main session read on its last turn
+  ['agents', 'carry_note', 'TEXT'],                            // summary to prepend to the first turn after 대화 정리
   ['agents', 'confirm_plan', 'INTEGER NOT NULL DEFAULT 0'],
   ['agents', 'pending_plan', 'INTEGER NOT NULL DEFAULT 0'],
   ['agents', 'auto_failover', 'INTEGER NOT NULL DEFAULT 0'],
