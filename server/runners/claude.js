@@ -7,6 +7,7 @@ import os from 'node:os';
 import readline from 'node:readline';
 import { DATA_DIR, SERVER_DIR } from '../paths.js';
 import { PHONE_STYLE_PROMPT, withPhoneReminder } from '../style.js';
+import { normalizeClaudeUsage } from '../tokens.js';
 
 export function findClaudeBin() {
   const candidates = [
@@ -44,7 +45,7 @@ export function cleanClaudeEnv(cfg) {
  * One-shot, tool-less, context-free call used for triage. Resolves with parsed
  * structured output (or null on failure). Never touches the agent's session.
  */
-export function runClaudeOnce({ cwd, prompt, model = 'haiku', schema, cfg, onModel, timeoutMs = 60_000 }) {
+export function runClaudeOnce({ cwd, prompt, model = 'haiku', schema, cfg, onModel, onUsage, timeoutMs = 60_000 }) {
   return new Promise((resolve) => {
     // No tools at all, one turn: the model must answer in text. (--json-schema needs an internal
     // tool call, which conflicts with disabling tools, so we ask for JSON text and parse it.)
@@ -65,6 +66,7 @@ export function runClaudeOnce({ cwd, prompt, model = 'haiku', schema, cfg, onMod
         const j = JSON.parse(out);
         const used = Object.keys(j.modelUsage || {})[0];
         if (used) onModel?.(used);
+        onUsage?.(normalizeClaudeUsage(j), used);
         if (j.structured_output) return resolve(j.structured_output);
         const m = String(j.result || '').match(/\{[\s\S]*\}/);
         resolve(m ? JSON.parse(m[0]) : null);
@@ -194,6 +196,8 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
         num_turns: ev.num_turns,
         cost: ev.total_cost_usd,
         denials: ev.permission_denials,
+        usage: normalizeClaudeUsage(ev),
+        model: Object.keys(ev.modelUsage || {})[0] || null,
       });
     }
   }

@@ -1,11 +1,11 @@
 {
-  "name": "Agent Remote",
-  "short_name": "Agents",
+  "name": "leebeegle_SmartAgent",
+  "short_name": "SmartAgent",
   "description": "Run and monitor Claude Code / Codex on your PC from your phone",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#FFFFFF",
+  "background_color": "#F8EFE2",
   "theme_color": "#FFFFFF",
   "icons": [
     { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },

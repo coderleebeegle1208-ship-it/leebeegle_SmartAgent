@@ -134,6 +134,17 @@ export const Messages = {
   clear: (aid) => db.prepare('DELETE FROM messages WHERE agent_id = ?').run(aid),
   latestId: (aid) => Number(db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM messages WHERE agent_id = ?').get(aid)?.id || 0),
   after: (aid, id) => db.prepare('SELECT * FROM messages WHERE agent_id = ? AND id > ? ORDER BY id').all(aid, id),
+  usageSummary: (aid) => {
+    const row = (sinceMs) => db.prepare(`
+      SELECT COUNT(*) AS runs,
+             COALESCE(SUM(json_extract(meta, '$.total.tokens')), 0) AS tokens,
+             SUM(json_extract(meta, '$.total.cost')) AS cost,
+             SUM(json_extract(meta, '$.baseline.cost')) AS baseline_cost
+      FROM messages WHERE agent_id = ? AND role = 'usage' AND created_at >= ?
+    `).get(aid, sinceMs);
+    const startOfDay = new Date(now()); startOfDay.setHours(0, 0, 0, 0);
+    return { all: row(0), today: row(startOfDay.getTime()) };
+  },
 };
 
 export const Approvals = {

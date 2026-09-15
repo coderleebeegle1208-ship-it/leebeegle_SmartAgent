@@ -1,4 +1,4 @@
-# Agent Remote
+# leebeegle_SmartAgent (구 Agent Remote)
 
 윈도우 PC에서 돌아가는 Claude Code / Codex를 **스마트폰 웹앱**으로 지시하고, 승인하고, 완료 알림을 받는 개인용 대시보드.
 
@@ -78,6 +78,7 @@ tailscale serve --bg 3000
 - 결과물이 웹페이지·HTML·화면처럼 눈으로 볼 수 있는 것이면 Claude가 노트북의 Edge/Chrome으로 캡처해 폰 대화에 이미지로 올립니다. "어떻게 생겼는지 보여줘"라고 하면 됩니다. 이미지는 `data/captures/`에 저장되고 눌러서 크게 볼 수 있습니다. (Codex 에이전트는 이 도구가 없습니다.)
 - 홈 화면의 프로젝트 줄에 GitHub 저장소 이름이 표시됩니다. 누르면 전체 주소가 나오고 `주소 복사`로 복사하거나 `GitHub에서 열기`로 브라우저에서 열 수 있습니다.
 - 저장소가 없는 프로젝트는 같은 자리에 `연결`이 보입니다. 저장소 주소를 붙여넣으면 연결되고, Git으로 관리되지 않던 폴더는 이때 `git init`까지 함께 처리합니다.
+- 승인 요청(파일 수정·명령 실행·질문)은 입력창 바로 위에 나타납니다. 대화가 길어도 스크롤을 올릴 필요가 없습니다.
 - 우측 원형 사용량 버튼은 5시간 한도의 사용 비율을 나타냅니다. 누르면 5시간 한도, 주간 전체 한도, Fable 한도와 리셋 시각을 확인하고 새로고침할 수 있습니다.
 - `수동`: 모델 하나를 직접 지정. 입력창 위 흐름이 `Sonnet / 실행 · 기본` 한 단계로 바뀌고, 모델 이름과 강도 칩을 같은 방식으로 바꿉니다.
 - 입력창 위 맨 윗줄의 칩으로 권한과 모델 구성을 고릅니다. 클로드 데스크톱의 모드 메뉴처럼 눌러서 체크 목록에서 선택합니다.
@@ -114,7 +115,9 @@ npm test
 powershell -ExecutionPolicy Bypass -File scripts\register-autostart.ps1
 ```
 
-  해제: `Unregister-ScheduledTask -TaskName AgentRemote -Confirm:$false`
+  등록되는 작업 이름은 `leebeegle_SmartAgent`이고, Claude나 터미널과 무관하게 로그인만 하면 서버가 뜹니다. 서버가 죽으면 1분 간격으로 3번까지 자동 재시작합니다.
+  해제: `powershell -ExecutionPolicy Bypass -File scripts\unregister-autostart.ps1`
+  폴더 이름이나 위치를 바꾸면 등록 명령을 한 번 더 실행해야 새 경로를 가리킵니다.
 - 절전 끄기 (전원 연결 시): `powercfg /change standby-timeout-ac 0`
 - Tailscale serve 설정은 재부팅 후에도 유지됩니다. 해제: `tailscale serve --https=443 off`
 

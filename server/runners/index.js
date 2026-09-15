@@ -11,8 +11,10 @@ import { planPhase } from '../state.js';
 import { modelLabel } from '../models.js';
 import { gitSummary } from '../git.js';
 import { buildReviewPrompt, buildRevisionPrompt, compactConversation, formatGitManifest, otherProvider } from '../collaboration.js';
+import { normalizeCodexUsage, summarizeRun, usageHeadline } from '../tokens.js';
 
 const live = new Map(); // agentId -> { child, cancelled }
+const usageAcc = new Map(); // agentId -> stage usage rows for the run in progress
 const KIND_LABEL = { claude: 'Claude', codex: 'Codex' };
 const STAGE_LABEL = { implement: '구현', review: '교차 리뷰', revise: '최종 수정' };
 const EFFORT_LABEL = { low: '낮음', medium: '중간', high: '높음', xhigh: '매우 높음', max: '최대' };
@@ -49,6 +51,23 @@ function note(agentId, text) {
   const m = Messages.add(agentId, 'system', text);
   emit('message', { agent_id: agentId, message: m });
 }
+function pushUsage(agentId, row) {
+  if (!usageAcc.has(agentId)) usageAcc.set(agentId, []);
+  usageAcc.get(agentId).push(row);
+}
+/** Rolls up this run's stage usage into one message, comparing against the plan model as a
+ * single-model baseline for auto-pipeline agents. Call once per run, right before it settles. */
+function flushUsage(agentId) {
+  const stages = usageAcc.get(agentId);
+  usageAcc.delete(agentId);
+  if (!stages || !stages.length) return;
+  const agent = Agents.get(agentId);
+  if (!agent) return;
+  const baselineModel = agent.pipeline === 'auto' && stages.length > 1 ? agent.plan_model : null;
+  const summary = summarizeRun(stages, baselineModel);
+  const m = Messages.add(agentId, 'usage', usageHeadline(summary), summary);
+  emit('message', { agent_id: agentId, message: m });
+}
 function update(agentId, fields) {
   const a = Agents.update(agentId, fields);
   emit('agent.updated', { agent: a });
@@ -74,10 +93,14 @@ function runTurn(agentId, text, cfg, opts = {}) {
     const runtimeModel = Object.hasOwn(opts, 'model') ? opts.model : provider === 'codex' ? null : agent.model;
     const runtimeAgent = { ...agent, kind: provider, session_id: savedSession, model: runtimeModel };
     let result = null;
+    let resolvedModel = null;
     const hooks = {
       onLog: (line) => console.log(`[agent ${agentId}] ${line}`),
       onSession: (sessionId, info) => {
-        if (info?.model) recordResolvedModel(agentId, opts.stage, info.model);
+        if (info?.model) {
+          resolvedModel = info.model;
+          recordResolvedModel(agentId, opts.stage, info.model);
+        }
         if (!sessionId) return;
         AgentSessions.upsert(agentId, provider, sessionId);
         const current = Agents.get(agentId);
@@ -90,6 +113,16 @@ function runTurn(agentId, text, cfg, opts = {}) {
       },
       onResult: (r) => {
         result = { ...r, provider, ...(opts.phase ? { phase: opts.phase } : {}) };
+        const usage = provider === 'codex' ? (r.usage ? normalizeCodexUsage(r.usage) : null) : r.usage;
+        if (usage) {
+          pushUsage(agentId, {
+            stage: opts.stage || 'manual',
+            phase: opts.phase || null,
+            provider,
+            model: r.model || resolvedModel || opts.model || null,
+            ...usage,
+          });
+        }
         if (r.session_id && Agents.get(agentId)) {
           AgentSessions.upsert(agentId, provider, r.session_id);
           if (Agents.get(agentId)?.kind === provider) Agents.update(agentId, { session_id: r.session_id });
@@ -135,6 +168,7 @@ ${text}`;
   const r = await runClaudeOnce({
     cwd: workspace.path, prompt, model: agent.triage_model || 'haiku', schema: TRIAGE_SCHEMA, cfg,
     onModel: (id) => recordResolvedModel(agent.id, 'triage', id),
+    onUsage: (u, id) => pushUsage(agent.id, { stage: 'triage', phase: null, provider: 'claude', model: id || agent.triage_model, ...u }),
   });
   if (!r || typeof r.complex !== 'boolean') return { complex: text.length > 200, reason: '분류 실패, 길이로 판단' };
   return r;
@@ -332,6 +366,7 @@ async function runPipeline(agentId, text, cfg, flow = { allowFailover: true }) {
     update(agentId, { status: 'needs_attention', pending_plan: 1, last_response: planRun.text || '계획이 준비되었습니다.' });
     note(agentId, '계획 확인 대기 · "이 계획대로 실행"을 누르면 진행합니다.');
     push(agent, '계획 확인 필요', planRun.text || '계획이 준비되었습니다.');
+    flushUsage(agentId);
     return;
   }
   note(agentId, `계획 완료 → ${withEffort(agent.exec_model, efforts.exec)} 실행`);
@@ -340,6 +375,7 @@ async function runPipeline(agentId, text, cfg, flow = { allowFailover: true }) {
 }
 
 function finish(agentId, r, opts = {}) {
+  flushUsage(agentId);
   const agent = Agents.get(agentId);
   if (!agent) return;
   if (!r) return;
@@ -370,6 +406,7 @@ export function startPrompt(agentId, text, cfg) {
   if (!Workspaces.get(agent.workspace_id)) throw new Error('workspace not found');
   if (agent.collab_mode && !findCodexEntry()) throw new Error('교차 협업에는 Codex CLI가 필요합니다');
 
+  usageAcc.delete(agentId);
   const userMsg = Messages.add(agentId, 'user', text);
   emit('message', { agent_id: agentId, message: userMsg });
   const updated = update(agentId, { status: 'working', last_error: null, pending_plan: 0, collab_stage: agent.collab_mode ? 'implement' : null });
@@ -386,6 +423,7 @@ export function executePlan(agentId, cfg) {
   if (!agent) throw new Error('agent not found');
   if (live.has(agentId)) throw new Error('이미 작업 중입니다');
   if (!agent.pending_plan) throw new Error('실행 대기 중인 계획이 없습니다');
+  usageAcc.delete(agentId);
   const updated = update(agentId, { status: 'working', pending_plan: 0, collab_stage: null });
   const efforts = stageEfforts(agent);
   note(agentId, `계획 승인 → ${withEffort(agent.exec_model, efforts.exec)} 실행`);

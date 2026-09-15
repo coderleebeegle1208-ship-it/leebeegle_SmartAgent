@@ -1,4 +1,4 @@
-' Starts the Agent Remote server without a console window. Used by the logon scheduled task.
+' Starts the leebeegle_SmartAgent server without a console window. Used by the logon scheduled task.
 Set sh = CreateObject("WScript.Shell")
 root = Replace(WScript.ScriptFullName, "\scripts\start-hidden.vbs", "")
 sh.CurrentDirectory = root

@@ -19,6 +19,9 @@
         .replace(/`([^`\n]+)`/g, '<code>$1</code>');
     }).join('');
   };
+  // Token-usage card formatting (mirrors server/tokens.js so both sides agree on shape).
+  const fmtTokens = (n) => (n < 1000 ? String(n) : n < 1_000_000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k` : `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`);
+  const fmtUsd = (n) => (n == null ? null : n < 0.01 ? '<$0.01' : `$${n.toFixed(2)}`);
   const statusLabel = { idle: '대기', working: '작업 중', needs_attention: '승인 필요', done: '완료', error: '오류' };
   const kindLabel = { claude: 'CLAUDE', codex: 'CODEX' };
   const collabStageLabel = { implement: '구현 중', review: '교차 리뷰 중', revise: '최종 수정 중' };
@@ -237,7 +240,9 @@
       case 'message':
         if (state.route.name === 'agent' && state.detail?.agent.id === m.agent_id) {
           state.detail.messages.push(m.message);
-          appendMessage(m.message, true);
+          // Usage cards carry a fresh cumulative rollup too, so refetch instead of a plain append.
+          if (m.message.role === 'usage') loadDetail(m.agent_id, true);
+          else appendMessage(m.message, true);
         }
         break;
       case 'approval.requested':
@@ -289,7 +294,8 @@
     document.body.classList.remove('lightbox-open');
   }
   window.addEventListener('popstate', (e) => {
-    const wasOpen = !$('#lightbox')?.hidden;
+    const box = $('#lightbox');
+    const wasOpen = !!box && !box.hidden; // the viewer element doesn't exist until first opened
     closeLightbox();
     if (e.state?.lightbox) return; // forward-navigated back onto a viewer entry: nothing to show
     if (wasOpen) return; // only the viewer closed; the agent screen underneath is untouched
@@ -318,6 +324,7 @@
   function render() {
     const isAgent = state.route.name === 'agent';
     document.body.classList.toggle('has-composer', isAgent);
+    if (!isAgent) document.body.style.paddingBottom = '';
     $('#btn-back').hidden = state.route.name === 'home';
     $('#topbar').classList.toggle('has-back', state.route.name !== 'home');
     $('#fab').hidden = state.route.name !== 'home';
@@ -328,7 +335,7 @@
   }
 
   function renderHome() {
-    $('#topbar-title').textContent = 'Agent Remote';
+    $('#topbar-title').textContent = 'leebeegle_SmartAgent';
     const d = state.data;
     if (!d) { view.innerHTML = '<div class="empty">불러오는 중…</div>'; return; }
     const c = d.counts;
@@ -430,11 +437,28 @@
   function usagePopupHTML() {
     if (!state.usage) return '<div class="usage-empty">사용량을 불러오는 중…</div>';
     if (!state.usage.ok && !state.usage.items?.length) return `<div class="usage-empty">사용량을 읽지 못했습니다${state.usage.error ? `<small>${esc(state.usage.error)}</small>` : ''}</div>`;
-    return usageSlots().map(([label, item]) => `
+    const limits = usageSlots().map(([label, item]) => `
       <div class="usage-popover-row">
         <div><strong>${label}</strong><small>${item?.resets ? `리셋 ${esc(item.resets)}` : item ? '리셋 시각 정보 없음' : '별도 사용량 항목 없음'}</small></div>
         <b class="${item?.pct >= 90 ? 'hot' : item?.pct >= 70 ? 'warm' : ''}">${item ? `${item.pct}%` : '—'}</b>
       </div>`).join('');
+    return limits + agentTokenUsageHTML();
+  }
+  // Cumulative token usage for the currently open agent (per-run cards are computed in tokens.js
+  // on the server; this just reads the two rollups it stores alongside GET /agents/:id).
+  function agentTokenUsageHTML() {
+    const s = state.detail?.usage_summary;
+    if (!s || (!s.today.runs && !s.all.runs)) return '';
+    const row = (label, r) => {
+      if (!r.runs) return '';
+      const cost = fmtUsd(r.cost);
+      const saved = r.baseline_cost > 0 && r.cost != null ? Math.round((1 - r.cost / r.baseline_cost) * 100) : null;
+      return `<div class="usage-popover-row">
+        <div><strong>${label}</strong><small>${r.runs}지시 · 토큰 ${fmtTokens(r.tokens)}</small></div>
+        <b>${cost ? cost : '—'}${saved != null && saved > 0 ? ` · ${saved}%↓` : ''}</b>
+      </div>`;
+    };
+    return `<div class="usage-popover-sep">이 대화</div>${row('오늘', s.today)}${row('전체', s.all)}`;
   }
   function primaryUsage() {
     const item = usageSlots()[0]?.[1] || state.usage?.items?.[0];
@@ -564,7 +588,6 @@
           </div>
         </div>
       </div>
-      <div id="approvals"></div>
       <div class="stream" id="msgs"></div>
       <div style="height:16px"></div>`;
 
@@ -588,6 +611,7 @@
         <small class="effort-hint" id="effort-hint"></small>
       </div>
       <div class="planbar" id="planbar" hidden><span>계획이 준비되었습니다.</span><button class="btn primary" id="exec-plan">이 계획대로 실행</button></div>
+      <div id="approvals"></div>
       <div class="menu-popover" id="mode-popover" role="menu" hidden>
         <div class="menu-head" id="mode-title"></div>
         <div id="mode-items"></div>
@@ -768,6 +792,7 @@
     }
     renderApprovals(approvals);
     renderAgentHead();
+    syncComposerSpace();
     if (!state.usage) loadUsage();
     const sendButton = $('#send');
     if (sendButton) sendButton.textContent = agent.collab_mode ? '협업 실행' : '보내기';
@@ -853,6 +878,25 @@
       const src = meta.file ? `/api/captures/${meta.file}?token=${encodeURIComponent(state.token)}` : '';
       el.innerHTML = `<button type="button" class="image-open" aria-label="크게 보기"><img src="${src}" alt="${esc(m.content)}" loading="lazy" ${meta.width && meta.height ? `width="${meta.width}" height="${meta.height}"` : ''}></button><figcaption>${esc(m.content)}<span class="time">${clock(m.created_at)}</span></figcaption>`;
       el.querySelector('.image-open').onclick = () => openLightbox(src, m.content);
+    } else if (m.role === 'usage') {
+      el.className = 'msg usage';
+      let u = null;
+      try { u = m.meta ? JSON.parse(m.meta) : null; } catch {}
+      if (!u) {
+        el.textContent = m.content;
+      } else {
+        const stageLabel = { triage: '판단', plan: '계획', exec: '실행', manual: '실행' };
+        const rows = u.stages.map((s) => {
+          const label = `${stageLabel[s.stage] || s.stage}${s.phase ? ` · ${phaseLabel[s.phase] || s.phase}` : ''} · ${modelLabel(s.model)}`;
+          const cacheNote = s.cacheRead ? ` (캐시 ${fmtTokens(s.cacheRead)})` : '';
+          const tok = `입력 ${fmtTokens(s.input)}${cacheNote} · 출력 ${fmtTokens(s.output)}`;
+          const cost = fmtUsd(s.cost);
+          return `<div class="usage-row"><b>${esc(label)}</b><span>${esc(tok)}</span><i>${cost ? esc(cost) : '—'}</i></div>`;
+        }).join('');
+        const note = '구독 요금제라 실제 청구는 아니고 API 요금으로 환산한 값입니다.'
+          + (u.baseline ? ` 절약률은 모든 단계를 ${esc(modelLabel(u.baseline.model))}로 돌렸을 때와 비교한 추정치입니다.` : '');
+        el.innerHTML = `<details class="usage-card"><summary>${esc(m.content)}</summary><div class="usage-rows">${rows}<div class="usage-note">${note}</div></div></details>`;
+      }
     } else if (m.role === 'handoff') {
       el.className = 'msg handoff';
       el.textContent = m.content;
@@ -882,9 +926,16 @@
     }
     if (scroll) window.scrollTo(0, document.body.scrollHeight);
   }
+  // The composer is fixed to the bottom, so the page needs a matching bottom gap; an approval
+  // card can double its height, so measure instead of assuming.
+  function syncComposerSpace() {
+    const composer = document.querySelector('.composer');
+    document.body.style.paddingBottom = composer ? `${composer.offsetHeight + 12}px` : '';
+  }
   function renderApprovals(list) {
     const host = $('#approvals');
     if (!host) return;
+    const atBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
     host.innerHTML = '';
     for (const ap of list) {
       let input = {};
@@ -929,6 +980,8 @@
       }
       host.appendChild(card);
     }
+    syncComposerSpace();
+    if (atBottom) requestAnimationFrame(() => window.scrollTo(0, document.body.scrollHeight));
   }
   async function decide(id, decision, extra = {}) {
     try {
@@ -1192,9 +1245,16 @@
     state.syncedAt = Date.now();
     connectWS();
     const q = new URLSearchParams(location.search);
-    if (q.get('agent')) go({ name: 'agent', id: Number(q.get('agent')) }, false);
-    else if (q.get('workspace')) go({ name: 'workspace', id: Number(q.get('workspace')) }, false);
-    else render();
+    const deepLinkId = q.get('agent') ? { name: 'agent', id: Number(q.get('agent')) }
+      : q.get('workspace') ? { name: 'workspace', id: Number(q.get('workspace')) }
+      : null;
+    if (deepLinkId) {
+      // A cold start (push notification tap, PWA relaunch) lands directly on this URL with no
+      // history beneath it, so the phone's back gesture has nowhere to go but out of the app.
+      // Seed a home entry first so the deep-linked screen sits on top of it.
+      history.replaceState({ name: 'home' }, '', '/');
+      go(deepLinkId);
+    } else render();
     document.addEventListener('visibilitychange', () => { if (!document.hidden) { state.syncedAt = Date.now(); if (state.route.name === 'agent') loadDetail(state.route.id, true); else refreshState(true); } });
   }
   boot();

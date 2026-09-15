@@ -7,9 +7,9 @@ self.addEventListener('push', (event) => {
   try {
     data = event.data ? event.data.json() : {};
   } catch {
-    data = { title: 'Agent Remote', body: event.data ? event.data.text() : '' };
+    data = { title: 'leebeegle_SmartAgent', body: event.data ? event.data.text() : '' };
   }
-  const title = data.title || 'Agent Remote';
+  const title = data.title || 'leebeegle_SmartAgent';
   event.waitUntil(
     self.registration.showNotification(title, {
       body: data.body || '',

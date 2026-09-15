@@ -53,3 +53,33 @@ export function modelLabel(value) {
   }
   return String(value);
 }
+
+// $/1M tokens: [input, output, cacheRead, cacheWrite]. Anthropic first-party API rates
+// (cached: 2026-06), used only to estimate what a subscription turn would have cost via the API.
+export const MODEL_PRICES = {
+  'claude-fable-5-1': [10, 50, 0.25, 12.5],
+  'claude-fable-5': [10, 50, 1, 12.5],
+  'claude-opus-5': [5, 25, 0.5, 6.25],
+  'claude-opus-4-8': [5, 25, 0.5, 6.25],
+  'claude-sonnet-5': [2, 10, 0.2, 2.5],
+  'claude-sonnet-4-6': [3, 15, 0.3, 3.75],
+  'claude-sonnet-4-5': [3, 15, 0.3, 3.75],
+  'claude-haiku-4-5': [1, 5, 0.1, 1.25],
+};
+
+/** Resolves an alias ("fable"), a pinned id, or a date-suffixed CLI id to its price row, or null. */
+export function priceFor(value) {
+  if (!value) return null;
+  if (MODEL_PRICES[value]) return MODEL_PRICES[value];
+  const f = byAlias[value];
+  if (f) {
+    for (const [id] of f.versions) if (MODEL_PRICES[id]) return MODEL_PRICES[id];
+    return null;
+  }
+  const m = String(value).match(/^claude-([a-z]+)-(\d+)(?:-(\d+))?/);
+  if (m) {
+    const id = `claude-${m[1]}-${m[2]}${m[3] ? `-${m[3]}` : ''}`;
+    if (MODEL_PRICES[id]) return MODEL_PRICES[id];
+  }
+  return null;
+}

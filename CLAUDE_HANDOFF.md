@@ -1,11 +1,14 @@
-# Claude 작업 인계 — Agent Remote
+# Claude 작업 인계 — leebeegle_SmartAgent (구 Agent Remote)
+
+앱 표시 이름은 2026-09-15에 `Agent Remote`에서 `leebeegle_SmartAgent`로 바꿨다(상단바·탭 제목·PWA manifest name/short_name·푸시 알림 제목·서버 시작 로그). 코드 주석과 CSS 첫 줄의 옛 이름은 그대로 두었다.
+앱 아이콘은 `beagle_calendar/assets/beagle_mascot.svg`의 비글 마스코트를 `public/icon.svg`(512 타일, 베이지 그라데이션 배경)에 넣은 것이다. `icon-192.png`/`icon-512.png`는 `server/capture.js`(headless Edge)로 SVG를 찍은 뒤 PowerShell System.Drawing으로 정확한 크기로 잘라 만들었다(외부 도구 없음). 상단바 왼쪽에 26px 로고를 두고 접속 상태 점을 로고 모서리에 겹쳤다. manifest `background_color`는 아이콘 배경색 `#F8EFE2`.
 
 작성일: 2026-09-15  
 상태: 요청한 채팅 입력부 모델 흐름·사용량 표시·리뷰 토글 구현 완료
 
 ## 가장 먼저 확인할 것
 
-- 프로젝트 경로: `C:\Users\leebe\Desktop\remote-project`
+- 프로젝트 경로: `C:\Users\leebe\Desktop\leebeegle_SmartAgent` (2026-09-15에 `remote-project`에서 이름 변경. Claude 데스크톱 앱이 `.claude`를 잡고 있어 폴더 통째 rename은 실패하므로 하위 항목을 `Move-Item`으로 옮겼고, `data/app.sqlite`의 `workspaces.path`도 함께 갱신했다. 빈 `remote-project` 폴더는 앱 재시작 후 삭제하면 된다.)
 - 실행: `node --no-warnings=ExperimentalWarning server/index.js`
 - 기본 URL: `http://localhost:3000`
 - 회귀 테스트: `node --test test/core.test.js`
@@ -135,6 +138,18 @@
 - 레이아웃: 프로젝트 줄이 한 줄에 다 들어가지 못해 이름이 잘렸다. `.sect`를 2줄 그리드로 바꿨다(1행: 별 + 이름 + 커밋/추가/펼침, 2행: 저장소 태그 + 경로). 저장소는 `.tb`가 아니라 작은 `.repo-tag` 알약으로, 없으면 점선 테두리에 `GitHub 연결`. 320·360·390px 확인.
 - 대화상자 정리: 주소를 input이 아니라 `.repo-card` 안의 줄바꿈되는 모노 박스로 보여준다(긴 주소가 잘리지 않는다). 상단에 GitHub 마크 + owner/repo, 아래에 `주소 복사`/`GitHub에서 열기` 버튼 2분할, 그 아래 안내 문구. 주소 변경은 `<details class="repo-change">`로 접어 두고, 접혀 있으면 `저장` 버튼도 숨긴다. 저장소가 없는 프로젝트는 입력칸만 펼친 단순한 형태로 열린다.
 - 테스트 13/13.
+
+## 추가 완료 (2026-09-15, 승인 카드 위치)
+
+- 승인 요청 카드(`#approvals`)를 화면 상단(메타 영역 아래)에서 composer 안으로 옮겼다. 대화가 길면 카드가 화면 밖에 있어 사용자가 한참 기다리는 문제가 있었다.
+- composer 높이가 카드만큼 늘어나므로 `syncComposerSpace()`가 `document.body.style.paddingBottom`을 실제 높이로 맞춘다. 에이전트 화면을 벗어나면 초기화.
+- 카드는 `max-height: 42vh` + 세로 스크롤, 내부 diff는 120px로 제한. 카드가 뜰 때 사용자가 맨 아래에 있었다면 다시 맨 아래로 스크롤한다.
+- 검증: `/internal/approval`로 실제 승인 요청을 만들어 입력창 위 표시 → 위로 스크롤해도 계속 보임 → `허용`으로 해소되고 여백 복구까지 확인.
+
+## 추가 완료 (2026-09-15, 자동 시작)
+
+- 예전 로그온 작업 `AgentRemote`가 옛 경로(`remote-project`)를 가리켜 실행이 실패하고 있었다(결과 코드 0x8007010B). `scripts/register-autostart.ps1`이 옛 작업을 지우고 `leebeegle_SmartAgent` 이름으로 새 경로에 다시 등록하도록 바꿨고, `scripts/unregister-autostart.ps1`을 추가했다.
+- 지금 떠 있는 서버는 스케줄러가 띄운 것이라 Claude 세션이 끝나도 유지된다. Claude 세션에서 서버를 직접 띄우면 세션 종료·폴더 이동 때 같이 죽으니, 앞으로는 `Start-ScheduledTask -TaskName leebeegle_SmartAgent`로 켜고, 코드 변경 후 재시작은 포트 3000 프로세스를 종료한 뒤 같은 명령을 쓰면 된다.
 
 ## 변경한 파일
 

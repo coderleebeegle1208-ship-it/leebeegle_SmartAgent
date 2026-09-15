@@ -229,6 +229,7 @@ api.get('/agents/:id', (req, res) => {
     workspace: Workspaces.get(a.workspace_id),
     messages: Messages.forAgent(a.id, Number(req.query.limit) || 300),
     approvals: Approvals.pendingForAgent(a.id),
+    usage_summary: Messages.usageSummary(a.id),
   });
 });
 api.patch('/agents/:id', (req, res) => {
@@ -313,7 +314,7 @@ api.post('/push/subscribe', (req, res) => {
   res.json({ ok: true });
 });
 api.post('/push/test', async (req, res) => {
-  await sendPush({ title: 'Agent Remote', body: '푸시 알림이 정상 동작합니다.', url: '/' });
+  await sendPush({ title: 'leebeegle_SmartAgent', body: '푸시 알림이 정상 동작합니다.', url: '/' });
   res.json({ ok: true, subscriptions: PushSubs.all().length });
 });
 
@@ -397,7 +398,7 @@ setInterval(() => {
 }, 30_000).unref();
 
 server.listen(cfg.port, '0.0.0.0', () => {
-  console.log(`Agent Remote listening on http://localhost:${cfg.port}`);
+  console.log(`leebeegle_SmartAgent listening on http://localhost:${cfg.port}`);
   console.log(process.stdout.isTTY ? `Access token: ${cfg.token}` : 'Access token: stored in data/config.json');
   console.log(`Claude binary: ${findClaudeBin()}`);
   console.log(`Codex CLI: ${findCodexEntry() ? 'found' : 'not installed'}`);
