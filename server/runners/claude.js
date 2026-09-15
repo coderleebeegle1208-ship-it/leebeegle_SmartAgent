@@ -247,12 +247,15 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
 
 export function buildClaudeArgs(agent, mcpPath, opts = {}) {
   // `capture` only writes into data/captures on this PC, so it never needs a phone approval.
-  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-prompt-tool', 'mcp__approver__approve', '--mcp-config', mcpPath, '--allowedTools', 'mcp__approver__capture', '--append-system-prompt', PHONE_STYLE_PROMPT];
+  // WebFetch is also pre-allowed: it's read-only, and a link the user attaches should just get read.
+  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-prompt-tool', 'mcp__approver__approve', '--mcp-config', mcpPath, '--allowedTools', 'mcp__approver__capture', 'mcp__approver__restart_server', 'WebFetch', '--append-system-prompt', PHONE_STYLE_PROMPT];
   if (agent.session_id) args.push('--resume', agent.session_id);
   if (opts.tools) {
     const tools = Array.isArray(opts.tools) ? opts.tools : [opts.tools];
     args.push('--tools', ...tools);
   }
+  // Uploaded photos/videos live under data/uploads, outside the project folder Claude normally reads.
+  for (const dir of opts.addDirs || []) args.push('--add-dir', dir);
   const permissionMode = opts.permissionMode || (agent.permission_mode === 'acceptEdits' ? 'acceptEdits' : agent.permission_mode === 'auto' ? 'auto' : null);
   if (permissionMode) args.push('--permission-mode', permissionMode);
   if (opts.disallowedTools) {

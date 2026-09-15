@@ -15,6 +15,7 @@ const { MIN_CAPTURE_WIDTH, resolveTarget } = await import('../server/capture.js'
 const { MODEL_CATALOG, isModelAllowed, modelLabel } = await import('../server/models.js');
 const { isValidRemoteUrl, parseRemote } = await import('../server/git.js');
 const { estimateCost, normalizeClaudeUsage, normalizeCodexUsage, summarizeRun } = await import('../server/tokens.js');
+const { UPLOAD_DIR, attachmentBlock, extractLinks, loadUpload } = await import('../server/uploads.js');
 
 test('Codex resume options stay before the resume subcommand', () => {
   const args = buildCodexArgs(
@@ -179,6 +180,59 @@ test('per-stage effort: plan stays at least high, execution follows the CLI defa
   assert.deepEqual(args.slice(args.indexOf('--effort')), ['--effort', 'xhigh']);
   const inherited = buildClaudeArgs({ permission_mode: 'ask', session_id: null, model: null, effort: null }, 'agent.json', { model: 'sonnet', effort: null });
   assert.ok(!inherited.includes('--effort'));
+});
+
+test('WebFetch is pre-allowed and attachment folders get --add-dir', () => {
+  const args = buildClaudeArgs({ permission_mode: 'ask', session_id: null, model: null, effort: null }, 'agent.json', { addDirs: ['C:\\data\\uploads\\agent-1'] });
+  assert.ok(args.includes('WebFetch'));
+  const i = args.indexOf('--add-dir');
+  assert.ok(i > -1);
+  assert.equal(args[i + 1], 'C:\\data\\uploads\\agent-1');
+});
+
+test('Codex image attachments are passed as -i flags before resume', () => {
+  const args = buildCodexArgs(
+    { pre: ['codex.js'] },
+    { permission_mode: 'ask', session_id: 'thread-123', model: null },
+    { path: 'C:\\project' },
+    '사진 보고 답해',
+    { images: ['C:\\data\\uploads\\agent-1\\1-view.jpg'] },
+  );
+  const i = args.indexOf('-i');
+  assert.ok(i > -1);
+  assert.equal(args[i + 1], 'C:\\data\\uploads\\agent-1\\1-view.jpg');
+  assert.ok(i < args.indexOf('resume'));
+});
+
+test('attachmentBlock describes photos and video scene frames; extractLinks merges body URLs with explicit ones and dedupes', () => {
+  const links = extractLinks('이 페이지도 봐줘 https://example.com/a', ['https://example.com/a', 'https://example.com/b']);
+  assert.deepEqual(links, ['https://example.com/a', 'https://example.com/b']);
+
+  const block = attachmentBlock(
+    [
+      { kind: 'image', name: 'IMG_1.jpg', file: 'agent-1/1.jpg', view: 'agent-1/1-view.jpg', width: 4032, height: 3024 },
+      { kind: 'video', name: 'clip.mp4', file: 'agent-1/2.mp4', frames: ['agent-1/2-f1.jpg', 'agent-1/2-f2.jpg'], duration: 12, width: 1920, height: 1080 },
+    ],
+    links,
+  );
+  assert.match(block, /\[첨부 파일\]/);
+  assert.match(block, /사진 1: .*1-view\.jpg \(원본 IMG_1\.jpg, 4032×3024\)/);
+  assert.match(block, /동영상 1: .*2\.mp4 \(12초, 1920×1080\) · 장면 사진 2장:/);
+  assert.match(block, /Read 도구로 열어/);
+  assert.match(block, /\[참고 링크\]/);
+  assert.match(block, /https:\/\/example\.com\/a/);
+  assert.match(block, /WebFetch 도구로/);
+});
+
+test('a video with no scene frames tells the model it cannot see the content', () => {
+  const block = attachmentBlock([{ kind: 'video', name: 'clip.mp4', file: 'agent-1/2.mp4' }], []);
+  assert.match(block, /장면 사진 없음\(모델이 내용을 볼 수 없음\)/);
+});
+
+test('loadUpload rejects malformed or unknown attachment ids', () => {
+  assert.equal(loadUpload(1, '../../../etc/passwd'), null);
+  assert.equal(loadUpload(1, '1234-abcxyz'), null); // well-formed id, but no sidecar exists on disk
+  assert.equal(typeof UPLOAD_DIR, 'string');
 });
 
 test('Claude usage normalizer reads token counts and prefers summed modelUsage cost', () => {

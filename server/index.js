@@ -6,7 +6,8 @@ import path from 'node:path';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { loadConfig } from './config.js';
-import { PUBLIC_DIR } from './paths.js';
+import { PUBLIC_DIR, ROOT_DIR } from './paths.js';
+import { spawn } from 'node:child_process';
 import { AgentSessions, Workspaces, Agents, Messages, Approvals, PushSubs } from './db.js';
 import { bus, emit } from './bus.js';
 import { initPush, sendPush } from './push.js';
@@ -18,6 +19,7 @@ import { findCodexEntry } from './runners/codex.js';
 import { getUsage } from './usage.js';
 import { CAPTURE_DIR, captureScreenshot, findBrowserBin } from './capture.js';
 import { MODEL_CATALOG, isModelAllowed } from './models.js';
+import { UPLOAD_DIR, findFfmpeg, loadUpload, saveUpload } from './uploads.js';
 
 const cfg = loadConfig();
 initPush(cfg);
@@ -132,7 +134,7 @@ api.get('/state', (req, res) => {
   for (const a of agents) counts[a.status] = (counts[a.status] || 0) + 1;
   res.json({
     computer: { name: os.hostname(), platform: process.platform, ...stats, connected: true },
-    tools: { claude: findClaudeBin(), codex: !!findCodexEntry(), capture: !!findBrowserBin() },
+    tools: { claude: findClaudeBin(), codex: !!findCodexEntry(), capture: !!findBrowserBin(), ffmpeg: !!findFfmpeg() },
     models: MODEL_CATALOG,
     workspaces,
     agents,
@@ -270,10 +272,18 @@ api.delete('/agents/:id', (req, res) => {
   res.json({ ok: true });
 });
 api.post('/agents/:id/prompt', (req, res) => {
-  const text = String(req.body?.text || '').trim();
-  if (!text) return res.status(400).json({ error: 'text required' });
+  const id = Number(req.params.id);
+  const text = String(req.body?.text || '');
+  const links = Array.isArray(req.body?.links) ? req.body.links.filter((l) => typeof l === 'string') : [];
+  const attachmentIds = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
+  const attachments = [];
+  for (const item of attachmentIds) {
+    const upload = loadUpload(id, item?.id ?? item);
+    if (!upload) return res.status(400).json({ error: `첨부 파일을 찾을 수 없습니다: ${item?.id ?? item}` });
+    attachments.push(upload);
+  }
   try {
-    const a = startPrompt(Number(req.params.id), text, cfg);
+    const a = startPrompt(id, text, cfg, { attachments, links });
     res.json(agentView(a));
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -336,9 +346,71 @@ api.get('/captures/:dir/:name', (req, res) => {
   res.sendFile(p);
 });
 
+// Phone attachments: one file per request as a raw body (no multipart parser in this project).
+api.post('/agents/:id/uploads', express.raw({ type: () => true, limit: '400mb' }), async (req, res) => {
+  const agentId = Number(req.params.id);
+  if (!Agents.get(agentId)) return res.status(404).json({ error: 'agent not found' });
+  if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: '빈 파일입니다' });
+  let name = '';
+  try { name = decodeURIComponent(String(req.headers['x-file-name'] || '')); } catch {}
+  try {
+    const descriptor = await saveUpload({ agentId, name, mime: req.headers['content-type'], buffer: req.body });
+    res.json(descriptor);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+// Original + derived (resized photo / video scene frames) attachment files. Same ?token= pattern as captures.
+api.get('/uploads/:dir/:name', (req, res) => {
+  const { dir, name } = req.params;
+  if (!/^agent-\d+$/.test(dir) || !/^[\w.-]+\.(jpe?g|png|gif|webp|heic|heif|mp4|mov|webm|m4v|3gp)$/i.test(name)) return res.status(400).end();
+  const p = path.join(UPLOAD_DIR, dir, name);
+  if (!fs.existsSync(p)) return res.status(404).end();
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  res.sendFile(p);
+});
+
 app.use('/api', api);
 
 // ---------- internal: screenshot requested by the agent's `capture` MCP tool ----------
+// ---------- restart: the only safe way to bounce this server from inside an agent turn ----------
+// Agents run as children of this process, so killing it mid-turn cuts their own tool output. We
+// note the request, let every running turn finish, then hand off to scripts/restart-server.ps1
+// (which relaunches through the logon task) and exit.
+let restartPending = null;
+function scheduleRestart(reason, agentId) {
+  if (restartPending) return restartPending;
+  restartPending = { reason, agentId, at: Date.now() };
+  if (agentId) {
+    const m = Messages.add(agentId, 'system', '서버 재시작 예약 · 이 답변이 끝나면 5초 안에 다시 켜집니다');
+    emit('message', { agent_id: agentId, message: m });
+  }
+  const tick = setInterval(() => {
+    if (runningIds().length) return;
+    clearInterval(tick);
+    console.log(`restart requested (${reason}); relaunching via scripts/restart-server.ps1`);
+    // A directly spawned PowerShell dies with this process even when detached; going through
+    // `cmd start` hands it to a fresh console-less session that outlives us.
+    const script = path.join(ROOT_DIR, 'scripts', 'restart-server.ps1').replace(/'/g, "''");
+    const child = spawn('cmd.exe', ['/c', 'start', '""', '/b', 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', `& '${script}' -DelaySeconds 2`], {
+      cwd: ROOT_DIR, detached: true, stdio: 'ignore', windowsHide: true,
+    });
+    child.on('error', (e) => console.error('restart spawn failed:', e.message));
+    child.unref();
+    setTimeout(() => process.exit(0), 800);
+  }, 1000);
+  return restartPending;
+}
+app.post('/internal/restart', requireInternal, (req, res) => {
+  const agentId = Number(req.body?.agentId) || null;
+  scheduleRestart(req.body?.reason || 'agent', agentId);
+  res.json({ ok: true, pending: true });
+});
+api.post('/restart', (req, res) => {
+  scheduleRestart('user', null);
+  res.json({ ok: true, pending: true });
+});
+
 app.post('/internal/capture', requireInternal, async (req, res) => {
   const { agentId, url, file, html, caption, width, height, full_page, wait_ms } = req.body || {};
   const agent = Agents.get(Number(agentId));

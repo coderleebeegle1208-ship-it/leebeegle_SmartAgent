@@ -2,7 +2,7 @@
 (() => {
   const $ = (s, el = document) => el.querySelector(s);
   const view = $('#view');
-  const state = { token: localStorage.getItem('ar_token') || '', data: null, route: { name: 'home' }, filter: 'all', detail: null, ws: null, meta: null, collapsed: new Set() };
+  const state = { token: localStorage.getItem('ar_token') || '', data: null, route: { name: 'home' }, filter: 'all', detail: null, ws: null, meta: null, collapsed: new Set(), draft: {} };
   try { state.collapsed = new Set(JSON.parse(localStorage.getItem('ar_collapsed') || '[]')); } catch {}
 
   // ---------- helpers ----------
@@ -292,6 +292,125 @@
     const box = $('#lightbox');
     if (box) box.hidden = true;
     document.body.classList.remove('lightbox-open');
+  }
+
+  // ---------- composer attachments (photos/videos/links) ----------
+  // A "draft" is what's picked but not yet sent, keyed by agent id so it survives navigating
+  // away and back (the composer element itself is torn down whenever the agent screen unmounts).
+  function draftFor(agentId) {
+    return state.draft[agentId] || (state.draft[agentId] = { attachments: [], links: [] });
+  }
+  function closeAttachMenu() {
+    const p = document.querySelector('#attach-popover');
+    if (p) p.hidden = true;
+    document.querySelector('#attach-btn')?.setAttribute('aria-expanded', 'false');
+  }
+  function attachThumb(a) {
+    if (a.status === 'uploading' || a.status === 'error') return a.previewUrl || '';
+    if (a.kind === 'video') return a.poster ? `/api/uploads/${a.poster}?token=${encodeURIComponent(state.token)}` : a.previewUrl || '';
+    return `/api/uploads/${a.view || a.file}?token=${encodeURIComponent(state.token)}`;
+  }
+  function attachStripHTML(agentId) {
+    const draft = draftFor(agentId);
+    if (!draft.attachments.length && !draft.links.length) return '';
+    const cards = draft.attachments.map((a) => `
+      <div class="attach-card ${a.status}" data-local="${esc(a.localId)}">
+        <img src="${esc(attachThumb(a))}" alt="">
+        ${a.kind === 'video' ? '<i class="play">▶</i>' : ''}
+        ${a.status === 'uploading' ? `<div class="attach-progress" style="--pct:${a.progress || 0}%"></div>` : ''}
+        ${a.status === 'error' ? `<div class="attach-err" title="${esc(a.error || '')}">!</div>` : ''}
+        <button type="button" class="x" data-remove="${esc(a.localId)}" aria-label="제거">✕</button>
+      </div>`).join('');
+    const links = draft.links.map((l) => {
+      let host = l; try { host = new URL(l).hostname; } catch {}
+      return `<div class="attach-card link" data-local="${esc(l)}"><i>${ICON.globe}</i><span>${esc(host)}</span><button type="button" class="x" data-remove="${esc(l)}" aria-label="제거">✕</button></div>`;
+    }).join('');
+    return cards + links;
+  }
+  function renderAttachStrip(agentId) {
+    const strip = $('#attach-strip');
+    if (!strip) return;
+    const html = attachStripHTML(agentId);
+    strip.innerHTML = html;
+    strip.hidden = !html;
+    strip.querySelectorAll('[data-remove]').forEach((b) => (b.onclick = () => {
+      const draft = draftFor(agentId);
+      const before = draft.attachments.length;
+      draft.attachments = draft.attachments.filter((a) => a.localId !== b.dataset.remove);
+      if (draft.attachments.length === before) draft.links = draft.links.filter((l) => l !== b.dataset.remove);
+      renderAttachStrip(agentId);
+    }));
+    syncComposerSpace();
+  }
+  function uploadFile(agentId, file, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `/api/agents/${agentId}/uploads`);
+      xhr.setRequestHeader('Authorization', `Bearer ${state.token}`);
+      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+      xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name || 'file'));
+      xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress?.(Math.round((e.loaded / e.total) * 100)); };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText)); } catch { reject(new Error('서버 응답을 읽지 못했습니다')); }
+        } else {
+          let msg = xhr.statusText;
+          try { msg = JSON.parse(xhr.responseText)?.error || msg; } catch {}
+          reject(new Error(msg));
+        }
+      };
+      xhr.onerror = () => reject(new Error('업로드 실패'));
+      xhr.send(file);
+    });
+  }
+  async function uploadEntry(agentId, file, entry) {
+    try {
+      const descriptor = await uploadFile(agentId, file, (pct) => {
+        entry.progress = pct;
+        const bar = document.querySelector(`.attach-card[data-local="${CSS.escape(entry.localId)}"] .attach-progress`);
+        if (bar) bar.style.setProperty('--pct', pct + '%');
+      });
+      Object.assign(entry, descriptor, { status: 'done' });
+    } catch (e) {
+      entry.status = 'error';
+      entry.error = e.message;
+      toast(`첨부 실패: ${e.message}`);
+    }
+    renderAttachStrip(agentId);
+  }
+  function handleFiles(agentId, fileList) {
+    const files = [...fileList].filter((f) => /^(image|video)\//.test(f.type));
+    if (!files.length) return;
+    const draft = draftFor(agentId);
+    for (const file of files) {
+      const entry = {
+        localId: `local-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        status: 'uploading', kind: file.type.startsWith('video') ? 'video' : 'image',
+        name: file.name, previewUrl: URL.createObjectURL(file), progress: 0,
+      };
+      draft.attachments.push(entry);
+      uploadEntry(agentId, file, entry);
+    }
+    renderAttachStrip(agentId);
+  }
+  // A user message's attachments/links, rendered below its text: photo/video thumbnails plus link chips.
+  function messageAttachmentsHTML(meta) {
+    const atts = meta.attachments || [], links = meta.links || [];
+    if (!atts.length && !links.length) return '';
+    const cards = atts.map((a) => {
+      if (a.kind === 'video') {
+        const src = `/api/uploads/${a.file}?token=${encodeURIComponent(state.token)}`;
+        const poster = a.poster ? ` poster="/api/uploads/${a.poster}?token=${encodeURIComponent(state.token)}"` : '';
+        return `<video class="att" controls playsinline preload="none"${poster} src="${esc(src)}"></video>`;
+      }
+      const src = `/api/uploads/${a.view || a.file}?token=${encodeURIComponent(state.token)}`;
+      return `<button type="button" class="att image-open" data-src="${esc(src)}" data-caption="${esc(a.name || '')}"><img src="${esc(src)}" alt="${esc(a.name || '')}" loading="lazy"></button>`;
+    }).join('');
+    const linkChips = links.map((l) => {
+      let host = l; try { host = new URL(l).hostname; } catch {}
+      return `<a class="link-chip" href="${esc(l)}" target="_blank" rel="noopener">${ICON.globe}${esc(host)}</a>`;
+    }).join('');
+    return `<div class="attachments">${cards}${linkChips}</div>`;
   }
   window.addEventListener('popstate', (e) => {
     const box = $('#lightbox');
@@ -616,9 +735,19 @@
         <div class="menu-head" id="mode-title"></div>
         <div id="mode-items"></div>
       </div>
+      <div class="menu-popover" id="attach-popover" role="menu" hidden>
+        <div class="menu-head">첨부</div>
+        <button type="button" class="menu-item" id="attach-pick"><span><b>사진·동영상 선택</b><small>갤러리에서 고르기</small></span></button>
+        <button type="button" class="menu-item" id="attach-camera"><span><b>카메라로 찍기</b><small>바로 촬영</small></span></button>
+        <button type="button" class="menu-item" id="attach-link"><span><b>링크 추가</b><small>웹페이지 주소 붙여넣기</small></span></button>
+      </div>
+      <input type="file" id="attach-input" accept="image/*,video/*" multiple hidden>
+      <input type="file" id="attach-camera-input" accept="image/*" capture="environment" hidden>
+      <div class="attach-strip" id="attach-strip" hidden></div>
       <div class="composer-modes" id="composer-modes"></div>
       <div class="composer-controls" id="composer-controls"></div>
       <div class="inner">
+        <button type="button" class="btn attach-btn" id="attach-btn" aria-label="첨부" aria-haspopup="menu" aria-expanded="false">${ICON.plus}</button>
         <textarea id="prompt" rows="1" placeholder="지시를 입력하세요…"></textarea>
         <button class="btn primary" id="send">보내기</button>
         <button class="btn stop" id="stop" hidden>중지</button>
@@ -631,7 +760,28 @@
       $('#send').onclick = sendPrompt;
       $('#stop').onclick = async () => { await api(`/agents/${state.detail.agent.id}/stop`, { method: 'POST' }); toast('중지 요청'); };
       $('#usage-refresh').onclick = () => loadUsage(true);
+      $('#attach-btn').onclick = () => {
+        const p = $('#attach-popover');
+        const opening = p.hidden;
+        document.querySelectorAll('#usage-popover, #effort-popover, #mode-popover').forEach((el) => { el.hidden = true; });
+        document.querySelectorAll('.step-effort[aria-expanded="true"], .mode-chip[aria-expanded="true"], #usage-ring[aria-expanded="true"]').forEach((b) => b.setAttribute('aria-expanded', 'false'));
+        p.hidden = !opening;
+        $('#attach-btn').setAttribute('aria-expanded', String(!opening));
+      };
+      $('#attach-pick').onclick = () => { closeAttachMenu(); $('#attach-input').click(); };
+      $('#attach-camera').onclick = () => { closeAttachMenu(); $('#attach-camera-input').click(); };
+      $('#attach-link').onclick = () => {
+        closeAttachMenu();
+        const url = (prompt('링크 주소를 붙여넣으세요') || '').trim();
+        if (!url) return;
+        if (!/^https?:\/\//i.test(url)) return toast('http:// 또는 https:// 로 시작하는 주소를 입력하세요');
+        draftFor(state.detail.agent.id).links.push(url);
+        renderAttachStrip(state.detail.agent.id);
+      };
+      $('#attach-input').onchange = (e) => { handleFiles(state.detail.agent.id, e.target.files); e.target.value = ''; };
+      $('#attach-camera-input').onchange = (e) => { handleFiles(state.detail.agent.id, e.target.files); e.target.value = ''; };
     }
+    renderAttachStrip(agent.id);
     $('#composer-controls').innerHTML = composerControlsHTML(agent, switchLocked);
     $('#composer-modes').innerHTML = composerModesHTML(agent, switchLocked);
     updateComposerUsage();
@@ -651,7 +801,7 @@
     };
     const closeUsage = () => { if (usagePopover) { usagePopover.hidden = true; usageRing?.setAttribute('aria-expanded', 'false'); } };
     if (usageRing && usagePopover) usageRing.onclick = () => {
-      closeEffort(); closeMode();
+      closeEffort(); closeMode(); closeAttachMenu();
       usagePopover.hidden = !usagePopover.hidden;
       usageRing.setAttribute('aria-expanded', String(!usagePopover.hidden));
       if (!usagePopover.hidden) loadUsage(true);
@@ -673,7 +823,7 @@
     document.querySelectorAll('.step-effort').forEach((btn) => (btn.onclick = () => {
       const stage = btn.dataset.stage;
       const opening = effortPopover.hidden || effortPopover.dataset.stage !== stage;
-      closeEffort(); closeMode(); closeUsage();
+      closeEffort(); closeMode(); closeUsage(); closeAttachMenu();
       if (!opening) return;
       effortPopover.dataset.stage = stage;
       syncEffortUI(stage);
@@ -755,7 +905,7 @@
     };
     const bindModeChips = () => document.querySelectorAll('.mode-chip').forEach((chip) => (chip.onclick = () => {
       const opening = modePopover.hidden || modePopover.dataset.menu !== chip.dataset.menu;
-      closeMode(); closeEffort(); closeUsage();
+      closeMode(); closeEffort(); closeUsage(); closeAttachMenu();
       if (opening) openModeMenu(chip);
     }));
     bindModeChips();
@@ -766,6 +916,7 @@
         if (!t.closest?.('#effort-popover, .step-effort')) closeEffort();
         if (!t.closest?.('#mode-popover, .mode-chip')) closeMode();
         if (!t.closest?.('#usage-popover, #usage-ring')) closeUsage();
+        if (!t.closest?.('#attach-popover, #attach-btn')) closeAttachMenu();
       });
     }
     const collab = $('#collab-mode');
@@ -908,7 +1059,10 @@
       const source = m.role === 'assistant' && meta.provider
         ? `<span class="msg-source">${esc(kindLabel[meta.provider] || meta.provider)}${meta.phase ? ` · ${esc(phaseLabel[meta.phase] || meta.phase)}` : ''}</span>`
         : '';
-      el.innerHTML = source + (m.role === 'assistant' ? rich(m.content) : esc(m.content)) + (m.role === 'user' || m.role === 'assistant' ? `<span class="time">${clock(m.created_at)}</span>` : '');
+      el.innerHTML = source + (m.role === 'assistant' ? rich(m.content) : esc(m.content))
+        + (m.role === 'user' ? messageAttachmentsHTML(meta) : '')
+        + (m.role === 'user' || m.role === 'assistant' ? `<span class="time">${clock(m.created_at)}</span>` : '');
+      el.querySelectorAll('.attachments .image-open').forEach((b) => (b.onclick = () => openLightbox(b.dataset.src, b.dataset.caption)));
     }
     if (folded) {
       const group = ensureActivity(box);
@@ -992,11 +1146,19 @@
   async function sendPrompt() {
     const ta = $('#prompt');
     const text = ta.value.trim();
-    if (!text) return;
+    const agentId = state.detail.agent.id;
+    const draft = draftFor(agentId);
+    if (draft.attachments.some((a) => a.status === 'uploading')) return toast('업로드가 끝나면 보내세요');
+    if (draft.attachments.some((a) => a.status === 'error')) return toast('업로드에 실패한 첨부를 지우거나 다시 시도하세요');
+    const attachments = draft.attachments.filter((a) => a.status === 'done').map((a) => ({ id: a.id }));
+    const links = draft.links.slice();
+    if (!text && !attachments.length && !links.length) return;
     try {
-      await api(`/agents/${state.detail.agent.id}/prompt`, { method: 'POST', body: { text } });
+      await api(`/agents/${agentId}/prompt`, { method: 'POST', body: { text, attachments, links } });
       ta.value = '';
       ta.style.height = 'auto';
+      delete state.draft[agentId];
+      renderAttachStrip(agentId);
     } catch (e) { toast(e.message); }
   }
   $('#dlg-agent-menu').addEventListener('click', async (e) => {

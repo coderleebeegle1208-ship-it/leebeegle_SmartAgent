@@ -53,6 +53,7 @@ tailscale serve --bg 3000
 - ＋ : 프로젝트 폴더를 워크스페이스로 등록
 - 워크스페이스의 **＋ 에이전트** : Claude / Codex 에이전트 생성 (권한 방식 선택)
 - 에이전트 화면에서 지시 입력 → 실시간 로그 → 완료 시 푸시
+- 입력창 왼쪽 **＋** 버튼으로 사진·동영상을 첨부하거나 카메라로 바로 찍고, 링크를 추가할 수 있습니다. 사진은 모델이 직접 보고, 동영상은 장면 사진 몇 장으로(ffmpeg 설치 시), 링크는 승인 없이 바로 읽고 답합니다. 첨부 파일은 `data/uploads/`에 저장됩니다.
 - 같은 에이전트에서 **Claude / Codex**를 바로 전환. 제공자별 세션을 따로 보관해 다시 돌아와도 이전 대화를 이어갑니다.
 - 선택 사항인 **한도 자동 전환**을 켜면 구독 한도 오류를 감지해 현재 지시를 다른 제공자가 이어서 처리합니다. 처음 켤 때 프로젝트 파일과 지시가 다른 제공자에게 전달된다는 확인을 받습니다.
 - **교차 협업**을 켜면 현재 선택한 제공자가 구현하고, 반대 제공자가 읽기 전용으로 리뷰한 뒤, 최초 구현자가 리뷰를 검증하고 최종 수정합니다. Claude와 Codex 어느 쪽에서 시작해도 같은 방식으로 동작합니다.
@@ -119,6 +120,7 @@ powershell -ExecutionPolicy Bypass -File scripts\register-autostart.ps1
   등록되는 작업 이름은 `leebeegle_SmartAgent`이고, Claude나 터미널과 무관하게 로그인만 하면 서버가 뜹니다. 서버가 죽으면 1분 간격으로 3번까지 자동 재시작합니다.
   해제: `powershell -ExecutionPolicy Bypass -File scripts\unregister-autostart.ps1`
   폴더 이름이나 위치를 바꾸면 등록 명령을 한 번 더 실행해야 새 경로를 가리킵니다.
+- 서버 재시작: `powershell -ExecutionPolicy Bypass -File scriptsestart-server.ps1`. 폰에서 에이전트에게 "서버 재시작해줘"라고 하면 에이전트가 전용 도구(`restart_server`)로 예약하고, 진행 중인 답변이 끝난 뒤 5초 안에 다시 켜집니다. 에이전트가 프로세스를 직접 죽이면 폰 연결이 끊기므로 지침으로 금지해 두었습니다.
 - 절전 끄기 (전원 연결 시): `powercfg /change standby-timeout-ac 0`
 - Tailscale serve 설정은 재부팅 후에도 유지됩니다. 해제: `tailscale serve --https=443 off`
 

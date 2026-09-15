@@ -119,6 +119,7 @@ export function buildCodexArgs(entry, agent, workspace, text, opts = {}) {
   // after `resume` makes current Codex CLIs reject the command before it starts.
   const args = [...entry.pre, 'exec', '--json', '--skip-git-repo-check', '-C', workspace.path, '--sandbox', sandbox];
   if (agent.model) args.push('-m', agent.model);
+  for (const image of opts.images || []) args.push('-i', image);
   if (agent.session_id) args.push('resume', agent.session_id, text);
   else args.push(text);
   return args;

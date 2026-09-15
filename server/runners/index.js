@@ -15,6 +15,7 @@ import { modelLabel } from '../models.js';
 import { gitSummary } from '../git.js';
 import { buildReviewPrompt, buildRevisionPrompt, compactConversation, formatGitManifest, otherProvider } from '../collaboration.js';
 import { normalizeCodexUsage, summarizeRun, usageHeadline } from '../tokens.js';
+import { UPLOAD_DIR, attachmentBlock, extractLinks, hasUploads } from '../uploads.js';
 
 const live = new Map(); // agentId -> { child, cancelled }
 const usageAcc = new Map(); // agentId -> stage usage rows for the run in progress
@@ -167,9 +168,14 @@ function runTurn(agentId, text, cfg, opts = {}) {
         resolve(result);
       },
     };
+    // Uploaded photos/videos live outside the project folder; once an agent has any, every Claude
+    // turn (not just the one that introduced them) gets read access so "아까 사진 다시 봐" works.
+    const claudeOpts = provider === 'claude' && hasUploads(agentId)
+      ? { ...opts, addDirs: [...(opts.addDirs || []), path.join(UPLOAD_DIR, `agent-${agentId}`)] }
+      : opts;
     const child = provider === 'codex'
       ? runCodex({ agent: runtimeAgent, workspace, text, hooks, opts })
-      : runClaude({ agent: runtimeAgent, workspace, text, cfg, hooks, opts });
+      : runClaude({ agent: runtimeAgent, workspace, text, cfg, hooks, opts: claudeOpts });
     if (child) live.set(agentId, { child, provider });
   });
 }
@@ -211,12 +217,24 @@ function plannerPrompt(agentId, text) {
   const recent = compactConversation(Messages.forAgent(agentId, 30), 5000);
   return `${recent ? `[최근 대화 요약]\n${recent}\n\n` : ''}[요청]\n${text}\n\n위 요청을 실행하기 위한 계획만 세워라. 파일을 수정하지 말고, 계획이 완성되면 ExitPlanMode로 제출해라.`;
 }
+/** The most recent user turn's attachments/links, rebuilt into the same block the planner saw —
+ * needed because the executor resumes the main session, which never saw the planner's fresh session. */
+function latestAttachmentBlock(agentId) {
+  const last = Messages.forAgent(agentId, 20).filter((m) => m.role === 'user').at(-1);
+  if (!last?.meta) return '';
+  let meta;
+  try { meta = JSON.parse(last.meta); } catch { return ''; }
+  if (!meta?.attachments?.length && !meta?.links?.length) return '';
+  return attachmentBlock(meta.attachments || [], meta.links || []);
+}
 /** The executor resumes the main session but never saw the planner's session, so the plan rides along. */
 function execPrompt(agentId, sinceMessageId) {
   const plan = Messages.after(agentId, sinceMessageId).filter((m) => m.role === 'plan').at(-1)
     || Messages.forAgent(agentId, 50).filter((m) => m.role === 'plan').at(-1);
-  if (!plan) return EXEC_PROMPT;
-  return `아래 계획을 그대로 실행해. 계획에 없는 작업은 하지 말고, 끝나면 무엇을 바꿨는지 한국어로 짧게 요약해.\n\n[계획]\n${plan.content}`;
+  const base = plan
+    ? `아래 계획을 그대로 실행해. 계획에 없는 작업은 하지 말고, 끝나면 무엇을 바꿨는지 한국어로 짧게 요약해.\n\n[계획]\n${plan.content}`
+    : EXEC_PROMPT;
+  return base + latestAttachmentBlock(agentId);
 }
 
 export function isUsageLimitError(result) {
@@ -370,13 +388,15 @@ async function runCollaboration(agentId, originalText, cfg) {
   return finish(agentId, revision.result, { title: revision.result?.ok ? '교차 협업 완료' : '최종 수정 오류' });
 }
 
-async function runPipeline(agentId, text, cfg, flow = { allowFailover: true }) {
+async function runPipeline(agentId, text, cfg, flow = { allowFailover: true }, extra = {}) {
   let agent = Agents.get(agentId);
   const workspace = Workspaces.get(agent.workspace_id);
   const efforts = stageEfforts(agent);
 
   if (agent.kind !== 'claude' || agent.pipeline !== 'auto') {
-    const r = await runTurn(agentId, text, cfg, { stage: 'manual' });
+    // Codex has no equivalent of Claude's --add-dir Read access, so photos ride along as -i flags
+    // instead — only meaningful on this single-turn path, since Codex never enters the plan/exec split below.
+    const r = await runTurn(agentId, text, cfg, { stage: 'manual', images: extra.images });
     return completeOrFailover(agentId, r, text, cfg, flow.allowFailover !== false);
   }
 
@@ -492,8 +512,19 @@ function finish(agentId, r, opts = {}) {
   return r;
 }
 
+/** Chat-visible fallback text for a prompt that is only attachments/links (no typed message). */
+function describeAttachments(attachments, links) {
+  const imgN = attachments.filter((a) => a.kind === 'image').length;
+  const vidN = attachments.filter((a) => a.kind === 'video').length;
+  const parts = [];
+  if (imgN) parts.push(`(사진 ${imgN}장)`);
+  if (vidN) parts.push(`(동영상 ${vidN}개)`);
+  if (links.length) parts.push(`(링크 ${links.length}개)`);
+  return parts.join(' ');
+}
+
 let lastCfg = null;
-export function startPrompt(agentId, text, cfg) {
+export function startPrompt(agentId, text, cfg, extra = {}) {
   lastCfg = cfg;
   const agent = Agents.get(agentId);
   if (!agent) throw new Error('agent not found');
@@ -502,11 +533,19 @@ export function startPrompt(agentId, text, cfg) {
   if (!Workspaces.get(agent.workspace_id)) throw new Error('workspace not found');
   if (agent.collab_mode && !findCodexEntry()) throw new Error('교차 협업에는 Codex CLI가 필요합니다');
 
+  const attachments = extra.attachments || [];
+  const links = extractLinks(text, extra.links || []);
+  if (!text.trim() && !attachments.length && !links.length) throw new Error('내용이 없습니다');
+
   usageAcc.delete(agentId);
-  const userMsg = Messages.add(agentId, 'user', text);
+  const storedContent = text.trim() || describeAttachments(attachments, links);
+  const meta = attachments.length || links.length ? { attachments, links } : null;
+  const userMsg = Messages.add(agentId, 'user', storedContent, meta);
   emit('message', { agent_id: agentId, message: userMsg });
   const updated = update(agentId, { status: 'working', last_error: null, pending_plan: 0, collab_stage: agent.collab_mode ? 'implement' : null });
-  const task = agent.collab_mode ? runCollaboration(agentId, text, cfg) : runPipeline(agentId, text, cfg);
+  const modelText = text + attachmentBlock(attachments, links);
+  const images = attachments.filter((a) => a.kind === 'image').map((a) => path.join(UPLOAD_DIR, a.view || a.file));
+  const task = agent.collab_mode ? runCollaboration(agentId, modelText, cfg) : runPipeline(agentId, modelText, cfg, { allowFailover: true }, { images });
   task.catch((e) => {
     console.error('[pipeline]', e);
     finish(agentId, { ok: false, text: e.message });

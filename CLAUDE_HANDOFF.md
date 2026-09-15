@@ -169,6 +169,14 @@
 - 검증(agent 6): 정리 14초, 메모 754자. 다음 질문에 파일을 열지 않고 메모만으로 정확히 답했고, 그 턴의 읽기 양은 1.03M → 37k 토큰(환산 $0.565 → $0.06).
 - `runClaudeOnceText`(claude.js): 도구 없는 1턴 호출로 텍스트를 돌려주는 헬퍼.
 
+## 추가 완료 (2026-09-16, 서버 자체 재시작)
+
+- 장애 원인: 폰 에이전트가 서버 코드를 고친 뒤 `Stop-Process`로 서버를 죽이고 `Start-ScheduledTask -TaskName 'AgentRemote'`(옛 이름)를 불러 서버가 다시 뜨지 않았다(폰에 502). 에이전트는 서버의 자식 프로세스라 서버를 죽이는 것 자체도 위험하다.
+- 해결: `POST /internal/restart`(MCP 도구 `restart_server`) / `POST /api/restart`. `scheduleRestart()`는 `runningIds()`가 빌 때까지 1초마다 기다렸다가 `scripts/restart-server.ps1`을 `cmd /c start /b powershell ...`로 띄우고 `process.exit(0)`. 직접 `spawn('powershell', ..., {detached:true})`는 부모가 종료되면 같이 죽어서 실패했다(테스트로 확인). 스크립트는 남은 리스너를 정리하고 `Start-ScheduledTask leebeegle_SmartAgent`, 실패 시 `start-hidden.vbs`로 폴백.
+- `--allowedTools`에 `mcp__approver__restart_server` 추가, `style.js`에 "서버 재시작은 이 도구로만, 프로세스 직접 종료·직접 실행·예약 작업 직접 호출 금지" 규칙 추가.
+- 검증: `/api/restart`로 PID 11764 → 18956, 에이전트 도구 호출로 18956 → 26008, 둘 다 10초 안에 복귀. 에이전트는 "재시작 걸어뒀습니다"만 보고하고 끝냈다.
+- 함께 커밋: 폰 에이전트가 만들어 둔 사진·동영상 첨부와 링크 읽기(`server/uploads.js`, 테스트 23개 통과 상태).
+
 ## 변경한 파일
 
 - `server/db.js`

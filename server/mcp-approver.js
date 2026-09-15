@@ -43,6 +43,12 @@ async function captureForPhone(args) {
   return data;
 }
 
+const RESTART_TOOL = {
+  name: 'restart_server',
+  description: 'Restarts the phone dashboard server (this app, leebeegle_SmartAgent) after its code was changed. The restart waits until your current turn ends, then relaunches automatically within ~5 seconds. Call this instead of killing processes, running node server/index.js, or starting scheduled tasks yourself; those break the phone connection.',
+  inputSchema: { type: 'object', properties: { reason: { type: 'string', description: 'One short line: what changed' } } },
+};
+
 const CAPTURE_TOOL = {
   name: 'capture',
   description: 'Takes a screenshot of a web page, a local HTML file, or an HTML string on this PC and shows it in the phone chat as an image. Use it whenever the result of your work is something visual (web page, HTML, chart, UI) so the owner can see it on the phone. Only one of url / file / html is needed.',
@@ -106,9 +112,22 @@ rl.on('line', async (line) => {
             },
           },
           CAPTURE_TOOL,
+          RESTART_TOOL,
         ],
       },
     });
+  } else if (method === 'tools/call' && params?.name === 'restart_server') {
+    try {
+      const res = await fetch(`${URL_BASE}/internal/restart`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ agentId: Number(AGENT_ID), reason: params?.arguments?.reason || '' }),
+      });
+      if (!res.ok) throw new Error(`restart failed (${res.status})`);
+      send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: '재시작을 예약했습니다. 이 답변을 마치면 서버가 5초 안에 자동으로 다시 켜집니다. 더 이상 명령을 실행하지 말고 대표에게 "잠시 후 앱을 새로고침하면 됩니다"라고만 알리세요.' }] } });
+    } catch (err) {
+      send({ jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text: `재시작 예약 실패: ${err.message}` }] } });
+    }
   } else if (method === 'tools/call' && params?.name === 'capture') {
     const args = params?.arguments || {};
     try {
