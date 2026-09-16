@@ -1294,9 +1294,10 @@ test('telegram: approval buttons resolve like the phone, replies become prompts,
   Agents.update(agent.id, { status: 'idle' });
 
   assert.match(handleText('/help'), /leebeegle_SmartAgent/);
-  assert.match(handleText('/list'), new RegExp(`#${agent.id} 텔레봇`));
+  assert.ok(handleText("/list").includes(`#${agent.id} [tg-ws] 텔레봇`));
   assert.equal(handleText('/use 999999'), '그 번호의 담당자가 없습니다');
-  assert.match(handleText(`/use ${agent.id}`), /텔레봇에게 전달합니다/);
+  assert.match(handleText(`/use ${agent.id}`), /] 텔레봇 에게 전달합니다/);
+  assert.match(handleText("/who"), /텔레봇 에게 갑니다/);
   assert.equal(telegramStatus().last_agent, agent.id);
   // 작업 중이면 줄 세우기
   Agents.update(agent.id, { status: 'working' });

@@ -5,7 +5,7 @@
 // 연결 절차: BotFather에서 봇을 만들어 토큰을 앱 설정에 붙여넣기 → 앱이 보여주는 6자리 연결 번호를
 // 그 봇에게 보내기 → 이후 그 대화로만 알림이 가고 그 대화의 메시지만 받는다.
 // 외부 의존성 없이 Bot API를 long polling(getUpdates)으로 읽는다.
-import { Settings, Agents, Approvals } from './db.js';
+import { Settings, Agents, Approvals, Workspaces } from './db.js';
 import { addPushSink } from './push.js';
 import { resolveApproval } from './approvals.js';
 import { startPrompt, enqueuePrompt } from './runners/index.js';
@@ -98,9 +98,12 @@ export function handleCallbackData(data) {
   return { ok: true, text: decision === 'allow' ? (m[2] === 'run' ? '✅ 허용 · 이번 작업의 남은 요청도 모두 허용' : '✅ 허용했습니다') : '⛔ 거부했습니다' };
 }
 
+const wsName = (a) => Workspaces.get(a.workspace_id)?.name || '';
+/** "프로젝트 › 담당자" — 텔레그램에서 어느 프로젝트로 가는지 한눈에 보이게 */
+const who = (a) => `[${wsName(a)}] ${a.name}`;
 function agentLine(a) {
   const st = { idle: '대기', working: '작업 중', needs_attention: '승인 필요', done: '완료', error: '오류' }[a.status] || a.status;
-  return `#${a.id} ${a.name} · ${st}`;
+  return `#${a.id} ${who(a)} · ${st}`;
 }
 
 /** 텍스트 메시지 → 지시. 담당자는 마지막 알림을 보낸 에이전트(또는 /use 로 고른 것). */
@@ -109,25 +112,34 @@ export function handleText(text, { cfg = cfgRef } = {}) {
   if (!t) return '내용이 없습니다';
   const agents = Agents.all();
   if (/^\/(start|help|도움말)/.test(t)) {
-    return ['leebeegle_SmartAgent 연결됨.', '- 그냥 글을 보내면 마지막으로 보고한 담당자에게 지시로 전달됩니다', '- /list 담당자 목록', '- /use 번호 : 지시 받을 담당자 바꾸기', '- 승인 요청은 버튼으로 바로 답할 수 있습니다'].join('\n');
+    return ['leebeegle_SmartAgent 연결됨.', '- 그냥 글을 보내면 마지막으로 보고한 담당자에게 지시로 전달됩니다', '- /list 담당자 목록 (앞의 [ ]가 프로젝트)', '- /use 번호 : 지시 받을 담당자(프로젝트) 바꾸기', '- /who 지금 누구에게 가는지 확인', '- 승인 요청은 버튼으로 바로 답할 수 있습니다'].join('\n');
   }
-  if (/^\/(list|목록)/.test(t)) return agents.length ? agents.map(agentLine).join('\n') : '담당자가 없습니다. 앱에서 먼저 추가하세요.';
+  const cur = () => Agents.get(Number(Settings.get('tg_last_agent')));
+  if (/^\/(list|목록)/.test(t)) {
+    if (!agents.length) return '담당자가 없습니다. 앱에서 먼저 추가하세요.';
+    const c = cur();
+    return agents.map(agentLine).join('\n') + (c ? `\n\n지금 지시는 → ${who(c)}` : '');
+  }
+  if (/^\/(who|누구)/.test(t)) {
+    const c = cur();
+    return c ? `지금 지시는 ${who(c)} 에게 갑니다` : '아직 정해지지 않았습니다. /list 로 보고 /use 번호';
+  }
   const use = /^\/use\s+#?(\d+)/.exec(t);
   if (use) {
     const a = Agents.get(Number(use[1]));
     if (!a) return '그 번호의 담당자가 없습니다';
     Settings.set('tg_last_agent', String(a.id));
-    return `이제부터 ${a.name}에게 전달합니다`;
+    return `이제부터 ${who(a)} 에게 전달합니다`;
   }
   const target = Agents.get(Number(Settings.get('tg_last_agent'))) || (agents.length === 1 ? agents[0] : null);
   if (!target) return '누구에게 보낼지 정해주세요: /list 로 목록을 보고 /use 번호';
   try {
     if (target.status === 'working' || target.status === 'needs_attention') {
       const q = enqueuePrompt(target.id, t);
-      return `${target.name}이(가) 작업 중이라 ${q.count}번째로 줄 세웠습니다. 끝나면 이어서 시작합니다.`;
+      return `${who(target)} 이(가) 작업 중이라 ${q.count}번째로 줄 세웠습니다. 끝나면 이어서 시작합니다.`;
     }
     startPrompt(target.id, t, cfg);
-    return `${target.name}에게 전달했습니다. 끝나면 여기로 보고가 옵니다.`;
+    return `${who(target)} 에게 전달했습니다. 끝나면 여기로 보고가 옵니다.`;
   } catch (e) {
     return `전달 실패: ${e.message}`;
   }
