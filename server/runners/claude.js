@@ -223,6 +223,13 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
       if (ev.parent_tool_use_id) return; // subagent chatter: skip
       const u = ev.message.usage;
       if (u) lastContext = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+      // Running cost/loop watch: per-message usage (deduped by message id upstream) plus tool calls.
+      hooks.onProgress?.({
+        msgId: ev.message.id,
+        model: ev.message.model,
+        usage: u ? { input: u.input_tokens || 0, output: u.output_tokens || 0, cacheRead: u.cache_read_input_tokens || 0, cacheWrite: u.cache_creation_input_tokens || 0 } : null,
+        tools: ev.message.content.filter((b) => b.type === 'tool_use').map((b) => ({ name: b.name, input: b.input })),
+      });
       for (const block of ev.message.content) {
         if (block.type === 'text' && block.text?.trim()) hooks.onMessage?.('assistant', block.text);
         else if (block.type === 'tool_use') hooks.onMessage?.('tool', summarizeToolUse(block.name, block.input), { tool: block.name, id: block.id, ...toolStats(block.name, block.input) });

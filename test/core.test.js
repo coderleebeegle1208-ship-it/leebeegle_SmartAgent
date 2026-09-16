@@ -13,6 +13,7 @@ process.env.AGENT_REMOTE_BACKUP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'age
 const { AgentSessions, Agents, Messages, Workspaces } = await import('../server/db.js');
 const { buildClaudeArgs, claudeStdinText, guardSettings } = await import('../server/runners/claude.js');
 const { outsideRisk } = await import('../server/guard.js');
+const { createRunWatch, watchLimits, describeVerdict } = await import('../server/watchdog.js');
 const { CODEX_EFFICIENCY_CONFIG, buildCodexArgs, codexApproverConfig, codexApproverEnv, codexStyledText } = await import('../server/runners/codex.js');
 const { clipForTriage, claudeAddDirs, failoverContinuation, isUsageLimitError, stageEfforts, switchProvider } = await import('../server/runners/index.js');
 const { buildReviewPrompt, buildRevisionPrompt, compactConversation, formatGitManifest, otherProvider } = await import('../server/collaboration.js');
@@ -553,6 +554,7 @@ test('compactAfterTokens migration: v2-capped installs rise to 150k, 0 (off) and
   assert.equal(fresh.compactAfterTokens, 150_000);
   assert.equal(fresh.tokenOptimizationVersion, 3);
   assert.equal(fresh.planBudgetUsd, 0);
+  assert.deepEqual([fresh.runAlertUsd, fresh.runStopUsd, fresh.loopRepeatLimit], [10, 30, 8]);
 
   fs.rmSync(configPath, { force: true });
 });
@@ -941,6 +943,36 @@ test('guard hook: passes silently inside the workspace, blocks outside when the 
   assert.equal(args[args.indexOf('--settings') + 1], 's.json');
   const planArgs = buildClaudeArgs({ permission_mode: 'auto', session_id: null }, 'mcp.json', { settingsPath: 's.json', stage: 'plan' });
   assert.equal(planArgs.includes('--settings'), false, 'plan turns cannot edit, so no hook');
+});
+
+test('run watchdog: alerts once past the alert line, keeps going, stops past the stop line', () => {
+  const w = createRunWatch({ alertUsd: 10, stopUsd: 30, loopRepeat: 8 });
+  // Opus 5: $5/M input → 1M fresh input tokens ≈ $5 per message
+  const msg = (id) => ({ msgId: id, model: 'claude-opus-5', usage: { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0 }, tools: [] });
+  assert.equal(w.feed(msg('m1')), null);
+  assert.equal(w.feed(msg('m1')), null, 'same message id is not counted twice');
+  assert.equal(w.feed(msg('m2')).kind, 'alert', 'crossing $10 alerts');
+  assert.equal(w.feed(msg('m3')), null, 'alert fires once, work continues');
+  w.feed(msg('m4')); w.feed(msg('m5'));
+  const stop = w.feed(msg('m6'));
+  assert.equal(stop.kind, 'stop'); assert.equal(stop.reason, 'budget');
+  assert.equal(w.feed(msg('m7')), null, 'nothing more after a stop');
+  assert.match(describeVerdict(stop, { stopUsd: 30 }), /\$30\.00.*멈췄습니다.*계속해줘/);
+});
+
+test('run watchdog: the same tool call repeated too often stops the run, varied calls do not', () => {
+  const w = createRunWatch({ alertUsd: 0, stopUsd: 0, loopRepeat: 3 });
+  const call = (cmd) => ({ msgId: `t${Math.random()}`, model: 'claude-sonnet-5', usage: null, tools: [{ name: 'Bash', input: { command: cmd } }] });
+  assert.equal(w.feed(call('npm test')), null);
+  assert.equal(w.feed(call('npm run build')), null);
+  assert.equal(w.feed(call('npm test')), null);
+  const stop = w.feed(call('npm test'));
+  assert.equal(stop?.reason, 'loop'); assert.equal(stop.repeats, 3); assert.equal(stop.tool, 'Bash');
+  assert.match(describeVerdict(stop, { stopUsd: 30 }), /같은 시도\(Bash\)를 3번/);
+  const off = createRunWatch({ alertUsd: 0, stopUsd: 0, loopRepeat: 0 });
+  for (let i = 0; i < 20; i++) assert.equal(off.feed(call('x')), null, '0 = off');
+  assert.deepEqual(watchLimits({ runAlertUsd: 0, runStopUsd: 50 }), { alertUsd: 0, stopUsd: 50, loopRepeat: 8 });
+  assert.deepEqual(watchLimits({}), { alertUsd: 10, stopUsd: 30, loopRepeat: 8 });
 });
 
 test('turn snapshots capture tracked + untracked files and undo restores the exact previous tree', async () => {

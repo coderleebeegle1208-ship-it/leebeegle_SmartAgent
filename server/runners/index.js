@@ -8,6 +8,7 @@ import { AgentSessions, Agents, Messages, Snapshots, Workspaces } from '../db.js
 import { emit } from '../bus.js';
 import { sendPush } from '../push.js';
 import { expireApprovals, setBlanketAllow } from '../approvals.js';
+import { createRunWatch, watchLimits, describeVerdict } from '../watchdog.js';
 import { runClaude, runClaudeOnce, runClaudeOnceText } from './claude.js';
 import { findCodexEntry, runCodex } from './codex.js';
 import { planPhase } from '../state.js';
@@ -21,6 +22,7 @@ import { expandSkill, listSkills, resolveSkillCommand, skillCatalogBlock, skillP
 const live = new Map(); // agentId -> { child, cancelled }
 const usageAcc = new Map(); // agentId -> stage usage rows for the run in progress
 const turnSnap = new Map(); // agentId -> turn_snapshots row taken before the run in progress
+const runWatch = new Map(); // agentId -> cost/loop watch for the run in progress (spans plan + exec)
 const CONVO_ROLES = ['user', 'assistant', 'plan', 'handoff']; // the roles compactConversation actually reads
 const KIND_LABEL = { claude: 'Claude', codex: 'Codex' };
 const STAGE_LABEL = { implement: '구현', review: '교차 리뷰', revise: '최종 수정' };
@@ -143,6 +145,25 @@ function runTurn(agentId, text, cfg, opts = {}) {
         const m = Messages.add(agentId, role, content, { ...(meta || {}), provider, ...(opts.phase ? { phase: opts.phase } : {}) });
         emit('message', { agent_id: agentId, message: m });
       },
+      onProgress: (p) => {
+        if (!Agents.get(agentId) || opts.phase === 'review') return;
+        const limits = watchLimits(cfg);
+        if (!runWatch.has(agentId)) runWatch.set(agentId, createRunWatch(limits));
+        const verdict = runWatch.get(agentId).feed(p);
+        if (!verdict) return;
+        const text = describeVerdict(verdict, limits);
+        const current = Agents.get(agentId);
+        if (verdict.kind === 'alert') {
+          note(agentId, text);
+          push(current, '비용 알림', text);
+          return;
+        }
+        // 멈춤: 프로세스를 끊고, onExit가 이 사유로 마무리하도록 남겨 둔다.
+        const entry = live.get(agentId);
+        if (entry) entry.stopReason = text;
+        note(agentId, text);
+        stopAgent(agentId);
+      },
       onResult: (r) => {
         result = { ...r, provider, ...(opts.phase ? { phase: opts.phase } : {}) };
         const usage = provider === 'codex' ? (r.usage ? normalizeCodexUsage(r.usage) : null) : r.usage;
@@ -183,10 +204,14 @@ function runTurn(agentId, text, cfg, opts = {}) {
         }
       },
       onExit: ({ code, error, gotResult }) => {
+        const stopReason = live.get(agentId)?.stopReason || null;
         live.delete(agentId);
         const current = Agents.get(agentId);
         if (current) expireApprovals(agentId);
-        if (!gotResult && current) {
+        if (stopReason && current) {
+          // Watchdog stop: the note already explains it; the session stays resumable ("계속해줘").
+          result = { ok: false, text: stopReason, stopped: true, provider };
+        } else if (!gotResult && current) {
           const m = Messages.add(agentId, 'error', error || `종료 코드 ${code}`);
           emit('message', { agent_id: agentId, message: m });
           result = { ok: false, text: error || `exit ${code}`, crashed: true, provider };
@@ -354,7 +379,7 @@ async function runProviderWork(agentId, text, cfg, { kind, phase, autoRoute = fa
     }
     const hasPlan = Messages.after(agentId, planStartMessageId).some((m) => m.role === 'plan');
     const budgetHit = isPlanBudgetExceeded(planRun);
-    if (!planRun || (!planRun.ok && !hasPlan && !budgetHit) || planRun.crashed) return planRun;
+    if (!planRun || (!planRun.ok && !hasPlan && !budgetHit) || planRun.crashed || planRun.stopped) return planRun;
     if (!hasPlan && budgetHit) {
       note(agentId, `${STAGE_LABEL[phase]} · 계획 예산 초과 → 계획 없이 ${withEffort(agent.exec_model, efforts.exec)} 바로 실행`);
       return runTurn(agentId, text, cfg, { kind, phase, stage: 'exec', model: agent.exec_model, effort: efforts.exec });
@@ -493,7 +518,7 @@ async function runPipeline(agentId, text, cfg, flow = { allowFailover: true }, e
   }
   const hasPlan = Messages.after(agentId, planStartMessageId).some((m) => m.role === 'plan');
   const budgetHit = isPlanBudgetExceeded(planRun);
-  if (!planRun || (!planRun.ok && !hasPlan && !budgetHit) || planRun.crashed) {
+  if (!planRun || (!planRun.ok && !hasPlan && !budgetHit) || planRun.crashed || planRun.stopped) {
     return completeOrFailover(agentId, planRun, text, cfg, flow.allowFailover !== false);
   }
   if (!hasPlan && budgetHit) {
@@ -624,13 +649,14 @@ async function snapshotAfter(agentId) {
 function finish(agentId, r, opts = {}) {
   flushUsage(agentId);
   setBlanketAllow(agentId, false);
+  runWatch.delete(agentId);
   snapshotAfter(agentId);
   const agent = Agents.get(agentId);
   if (!agent) return;
   if (!r) return;
   if (r.ok) setTimeout(() => maybeAutoCompact(agentId, opts.cfg || lastCfg), 500);
   const ok = !!r.ok;
-  if (!ok) {
+  if (!ok && !r.stopped) {
     const errorText = r.text || r.subtype || '문제가 발생했습니다.';
     const last = Messages.forAgent(agentId, 1)[0];
     if (last?.role !== 'error' || last.content !== errorText) {
@@ -645,7 +671,7 @@ function finish(agentId, r, opts = {}) {
     pending_plan: 0,
     collab_stage: null,
   });
-  push(a, opts.title || (ok ? '완료' : '오류'), r.text || (ok ? '작업이 끝났습니다.' : '문제가 발생했습니다.'));
+  push(a, opts.title || (ok ? '완료' : r.stopped ? '멈춤 · 확인 필요' : '오류'), r.text || (ok ? '작업이 끝났습니다.' : '문제가 발생했습니다.'));
   return r;
 }
 

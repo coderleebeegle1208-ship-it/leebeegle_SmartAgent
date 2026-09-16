@@ -52,6 +52,12 @@ export function loadConfig() {
     cfg.tokenOptimizationVersion = 3;
     changed = true;
   }
+  if (cfg.runAlertUsd === undefined) {
+    cfg.runAlertUsd = 10;      // 한 작업이 이 금액을 넘으면 알림만 (0 = 끔)
+    cfg.runStopUsd = 30;       // 이 금액을 넘으면 멈추고 폰에 묻기 (0 = 끔)
+    cfg.loopRepeatLimit = 8;   // 같은 도구 호출이 이만큼 되풀이되면 멈춤 (0 = 끔)
+    changed = true;
+  }
   if (cfg.planBudgetUsd === undefined) {
     cfg.planBudgetUsd = 0; // USD ceiling for the plan stage (Fable); 0 = no cap. Triage already
     changed = true;        // decides whether a plan runs at all, so quality shouldn't be capped once it does.
