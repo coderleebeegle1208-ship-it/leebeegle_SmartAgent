@@ -1,6 +1,7 @@
 // Pending approval registry: the MCP approver (spawned by Claude) long-polls here,
 // the phone UI resolves via REST, and this module bridges the two.
-import { Approvals, Agents, Messages } from './db.js';
+import { Approvals, Agents, Messages, Workspaces } from './db.js';
+import { outsideRisk } from './guard.js';
 import { emit } from './bus.js';
 import { sendPush } from './push.js';
 import { planPhase } from './state.js';
@@ -31,9 +32,12 @@ export function summarizeInput(toolName, input) {
   return s.length > 300 ? s.slice(0, 300) + '…' : s;
 }
 
-export function requestApproval(agentId, toolName, input) {
+export function requestApproval(agentId, toolName, input, opts = {}) {
   const agent = Agents.get(agentId);
   if (!agent) return null;
+  // 작업 폴더 밖 변경은 되돌리기가 못 잡으므로 묶음 허용과 상관없이 대표에게 직접 묻는다.
+  const workspace = Workspaces.get(agent.workspace_id);
+  const risk = opts.risk === 'outside' || outsideRisk(toolName, input, workspace?.path) ? 'outside' : null;
 
   // ExitPlanMode carries the finished plan. Surface it in the UI. During the pipeline's planning
   // run we deny it with a stop message, otherwise the same (planning-model) process would go on
@@ -59,9 +63,10 @@ export function requestApproval(agentId, toolName, input) {
     return { approval, promise: Promise.resolve({ behavior: 'allow', updatedInput: input }) };
   }
 
-  const approval = Approvals.create(agentId, toolName, input);
-  // Questions still need a human even under blanket approval; everything else sails through.
-  const auto = toolName !== 'AskUserQuestion' ? blanket.get(agentId) : null;
+  const approval = Approvals.create(agentId, toolName, input, risk);
+  // Questions and outside-the-workspace changes still need a human even under blanket approval;
+  // everything else sails through.
+  const auto = toolName !== 'AskUserQuestion' && !risk ? blanket.get(agentId) : null;
   if (auto) {
     auto.count += 1;
     Approvals.resolve(approval.id, 'allowed', 'blanket');
@@ -74,10 +79,10 @@ export function requestApproval(agentId, toolName, input) {
   pending.set(approval.id, { promise, resolve });
 
   Agents.update(agentId, { status: 'needs_attention' });
-  Messages.add(agentId, 'system', `승인 요청 · ${toolName}: ${summarizeInput(toolName, input)}`, { approval_id: approval.id });
+  Messages.add(agentId, 'system', `${risk ? '⚠ 작업 폴더 밖 변경 · ' : ''}승인 요청 · ${toolName}: ${summarizeInput(toolName, input)}`, { approval_id: approval.id, ...(risk ? { risk } : {}) });
   emit('approval.requested', { approval, agent: Agents.get(agentId) });
   sendPush({
-    title: `${agent.name} · 승인 필요`,
+    title: `${agent.name} · ${risk ? '⚠ 폴더 밖 변경 확인' : '승인 필요'}`,
     body: `${toolName}: ${summarizeInput(toolName, input)}`.slice(0, 180),
     url: `/?agent=${agentId}`,
     tag: `approval-${approval.id}`,
@@ -101,7 +106,7 @@ export function resolveApproval(id, decision, extra = {}) {
   if (decision === 'allow' && extra.scope === 'run') {
     setBlanketAllow(approval.agent_id, true);
     for (const other of Approvals.pendingForAgent(approval.agent_id)) {
-      if (other.id === id || other.tool_name === 'AskUserQuestion') continue;
+      if (other.id === id || other.tool_name === 'AskUserQuestion' || other.risk) continue;
       resolveApproval(other.id, 'allow');
     }
   }

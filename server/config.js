@@ -34,13 +34,22 @@ export function loadConfig() {
     cfg.subagentModel = 'haiku'; // set to "" to let subagents use the main model
     changed = true;
   }
-  if (cfg.tokenOptimizationVersion !== 2) {
+  if (!(Number(cfg.tokenOptimizationVersion) >= 2)) {
     // v1 capped runaway 200k/300k installs at 100k; v2 tightens further to 50k so every tool
     // call re-reads less of a growing conversation. An explicit 0 (off) stays respected.
     if (cfg.compactAfterTokens !== 0) {
       cfg.compactAfterTokens = Math.min(Number(cfg.compactAfterTokens) || 50_000, 50_000);
     }
     cfg.tokenOptimizationVersion = 2;
+    changed = true;
+  }
+  if (cfg.tokenOptimizationVersion === 2) {
+    // v3: the 50k cap rotated real conversations dozens of times a day, and every rotation loses
+    // detail the owner then has to repeat. Triple it; a custom lower value or 0 (off) stays put.
+    if (cfg.compactAfterTokens !== 0 && (!cfg.compactAfterTokens || Number(cfg.compactAfterTokens) === 50_000)) {
+      cfg.compactAfterTokens = 150_000;
+    }
+    cfg.tokenOptimizationVersion = 3;
     changed = true;
   }
   if (cfg.planBudgetUsd === undefined) {

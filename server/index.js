@@ -436,7 +436,7 @@ api.post('/agents/:id/blanket', (req, res) => {
   if (on && !(isRunning(id) || a.status === 'working' || a.status === 'needs_attention')) return res.status(400).json({ error: '진행 중인 작업이 없습니다' });
   setBlanketAllow(id, on);
   if (on) {
-    for (const ap of Approvals.pendingForAgent(id)) if (ap.tool_name !== 'AskUserQuestion') resolveApproval(ap.id, 'allow');
+    for (const ap of Approvals.pendingForAgent(id)) if (ap.tool_name !== 'AskUserQuestion' && !ap.risk) resolveApproval(ap.id, 'allow');
   }
   res.json(agentView(Agents.get(id)));
 });
@@ -680,14 +680,14 @@ app.post('/internal/capture', requireInternal, async (req, res) => {
 
 // ---------- internal: approval long-poll from the MCP approver ----------
 app.post('/internal/approval', requireInternal, async (req, res) => {
-  const { agentId, toolName, input, approvalId } = req.body || {};
+  const { agentId, toolName, input, approvalId, risk } = req.body || {};
   let id = approvalId;
   let promise;
   if (id) {
     promise = waitForApproval(id);
     if (!promise) return res.json({ result: { behavior: 'deny', message: 'approval expired' } });
   } else {
-    const r = requestApproval(Number(agentId), toolName, input);
+    const r = requestApproval(Number(agentId), toolName, input, { risk });
     if (!r) return res.json({ result: { behavior: 'deny', message: 'unknown agent' } });
     id = r.approval.id;
     promise = r.promise;

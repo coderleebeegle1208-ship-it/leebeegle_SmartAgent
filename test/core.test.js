@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 process.env.AGENT_REMOTE_DB = ':memory:';
 process.env.CODEX_BIN = process.execPath;
@@ -10,7 +11,8 @@ process.env.AGENT_REMOTE_CONFIG = path.join(os.tmpdir(), `agent-remote-test-conf
 process.env.AGENT_REMOTE_BACKUP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-remote-backups-'));
 
 const { AgentSessions, Agents, Messages, Workspaces } = await import('../server/db.js');
-const { buildClaudeArgs, claudeStdinText } = await import('../server/runners/claude.js');
+const { buildClaudeArgs, claudeStdinText, guardSettings } = await import('../server/runners/claude.js');
+const { outsideRisk } = await import('../server/guard.js');
 const { CODEX_EFFICIENCY_CONFIG, buildCodexArgs, codexApproverConfig, codexApproverEnv, codexStyledText } = await import('../server/runners/codex.js');
 const { clipForTriage, claudeAddDirs, failoverContinuation, isUsageLimitError, stageEfforts, switchProvider } = await import('../server/runners/index.js');
 const { buildReviewPrompt, buildRevisionPrompt, compactConversation, formatGitManifest, otherProvider } = await import('../server/collaboration.js');
@@ -527,23 +529,29 @@ test('the phone-tone system prompt only rides on turns the owner reads, not plan
   assert.equal(manualArgs[manualArgs.indexOf('--append-system-prompt') + 1], PHONE_STYLE_PROMPT);
 });
 
-test('compactAfterTokens migration tightens old installs to 50k, respects 0 (off), and leaves a lower custom value alone', () => {
+test('compactAfterTokens migration: v2-capped installs rise to 150k, 0 (off) and a lower custom value stay put', () => {
   const configPath = process.env.AGENT_REMOTE_CONFIG;
   const write = (fields) => fs.writeFileSync(configPath, JSON.stringify(fields));
 
   write({ tokenOptimizationVersion: 1, compactAfterTokens: 100_000 });
-  assert.equal(loadConfig().compactAfterTokens, 50_000);
+  assert.equal(loadConfig().compactAfterTokens, 150_000, 'v1 → v2 cap → v3 triple');
 
-  write({ tokenOptimizationVersion: 1, compactAfterTokens: 0 });
+  write({ tokenOptimizationVersion: 2, compactAfterTokens: 50_000 });
+  assert.equal(loadConfig().compactAfterTokens, 150_000);
+
+  write({ tokenOptimizationVersion: 2, compactAfterTokens: 0 });
   assert.equal(loadConfig().compactAfterTokens, 0);
 
-  write({ tokenOptimizationVersion: 1, compactAfterTokens: 30_000 });
+  write({ tokenOptimizationVersion: 2, compactAfterTokens: 30_000 });
   assert.equal(loadConfig().compactAfterTokens, 30_000);
+
+  write({ tokenOptimizationVersion: 3, compactAfterTokens: 50_000 });
+  assert.equal(loadConfig().compactAfterTokens, 50_000, 'already on v3: an explicit 50k is a choice');
 
   fs.rmSync(configPath, { force: true });
   const fresh = loadConfig();
-  assert.equal(fresh.compactAfterTokens, 50_000);
-  assert.equal(fresh.tokenOptimizationVersion, 2);
+  assert.equal(fresh.compactAfterTokens, 150_000);
+  assert.equal(fresh.tokenOptimizationVersion, 3);
   assert.equal(fresh.planBudgetUsd, 0);
 
   fs.rmSync(configPath, { force: true });
@@ -866,6 +874,73 @@ test('blanket approval: allowing "for this run" auto-allows later tool requests 
   assert.equal(Approvals.get(fourth.approval.id).status, 'pending', 'asks again once switched off');
   resolveApproval(fourth.approval.id, 'deny');
   Agents.remove(agent.id); Workspaces.remove(ws.id);
+});
+
+test('guard: edits and mutating commands outside the workspace are flagged, reads and in-folder work are not', () => {
+  const ws = 'C:/Users/leebe/Desktop/leebeegle_SmartAgent';
+  const risk = (tool, input) => !!outsideRisk(tool, input, ws);
+  assert.equal(risk('Edit', { file_path: 'server/a.js' }), false);
+  assert.equal(risk('Edit', { file_path: String.raw`C:\Users\leebe\Desktop\leebeegle_SmartAgent\server\a.js` }), false);
+  assert.equal(risk('Write', { file_path: 'C:/Users/leebe/Desktop/other/x.txt' }), true);
+  assert.equal(risk('Write', { file_path: '../other/x.txt' }), true);
+  assert.equal(risk('Read', { file_path: 'C:/Windows/x' }), false, 'reading outside is fine');
+  assert.equal(risk('Bash', { command: 'cat C:/Users/leebe/Desktop/other/x.txt 2>/dev/null' }), false);
+  assert.equal(risk('Bash', { command: 'ls C:/Users/leebe/Desktop 2>&1' }), false);
+  assert.equal(risk('Bash', { command: 'claude -p --output-format json' }), false);
+  assert.equal(risk('Bash', { command: 'rm -rf node_modules' }), false, 'inside: the snapshot can undo it');
+  assert.equal(risk('Bash', { command: 'echo hi > notes.txt' }), false);
+  assert.equal(risk('Bash', { command: 'mv data/x C:/Users/leebe/Desktop/leebeegle_SmartAgent/data/y' }), false);
+  assert.equal(risk('Bash', { command: 'git reset --hard HEAD~1' }), false);
+  assert.equal(risk('Bash', { command: 'rm -rf C:/Users/leebe/Desktop/other' }), true);
+  assert.equal(risk('Bash', { command: String.raw`Remove-Item -Recurse "C:\Users\leebe\Desktop\old"` }), true);
+  assert.equal(risk('Bash', { command: 'echo hi > ~/notes.txt' }), true);
+  assert.equal(risk('Bash', { command: 'cp -r public /c/Users/leebe/Desktop/backup' }), true);
+  assert.equal(risk('Bash', { command: 'cp -r public /c/Users/leebe/Desktop/leebeegle_SmartAgent/backup' }), false, 'git-bash style path inside');
+  assert.equal(risk('Bash', { command: 'cd .. && rm -rf foo' }), true);
+  assert.equal(risk('Bash', { command: 'shutdown /s' }), true);
+});
+
+test('guard: outside-the-workspace requests skip blanket approval, are marked, and stay out of bulk allows', async () => {
+  const wsPath = path.join(os.tmpdir(), `guard-ws-${process.pid}`);
+  const ws = Workspaces.create('guard-ws', wsPath);
+  const agent = Agents.create(ws.id, 'claude', '안전봇');
+  setBlanketAllow(agent.id, true);
+  const inside = requestApproval(agent.id, 'Write', { file_path: path.join(wsPath, 'a.txt') });
+  assert.equal((await inside.promise).behavior, 'allow', 'inside: blanket applies');
+  const outside = requestApproval(agent.id, 'Write', { file_path: path.join(os.tmpdir(), 'elsewhere.txt') });
+  assert.equal(Approvals.get(outside.approval.id).status, 'pending', 'outside: still asks the owner');
+  assert.equal(Approvals.get(outside.approval.id).risk, 'outside');
+  const hooked = requestApproval(agent.id, 'Bash', { command: 'npm test' }, { risk: 'outside' });
+  assert.equal(Approvals.get(hooked.approval.id).risk, 'outside', 'the hook may flag a request itself');
+  setBlanketAllow(agent.id, false);
+  const plain = requestApproval(agent.id, 'Bash', { command: 'npm test' });
+  resolveApproval(plain.approval.id, 'allow', { scope: 'run' });
+  assert.equal(Approvals.get(outside.approval.id).status, 'pending', '"allow for this run" leaves outside requests alone');
+  assert.equal(Approvals.get(hooked.approval.id).status, 'pending');
+  resolveApproval(outside.approval.id, 'deny');
+  resolveApproval(hooked.approval.id, 'allow');
+  assert.equal((await hooked.promise).behavior, 'allow');
+  setBlanketAllow(agent.id, false);
+  Agents.remove(agent.id); Workspaces.remove(ws.id);
+});
+
+test('guard hook: passes silently inside the workspace, blocks outside when the server is unreachable', () => {
+  const hook = fileURLToPath(new URL('../server/guard-hook.js', import.meta.url));
+  const wsPath = path.join(os.tmpdir(), `hook-ws-${process.pid}`);
+  const run = (payload, env = {}) => execFileSync(process.execPath, [hook], {
+    input: JSON.stringify(payload), env: { ...process.env, APPROVER_WORKSPACE: wsPath, APPROVER_URL: '', APPROVER_TOKEN: '', APPROVER_AGENT_ID: '', ...env }, stdio: 'pipe',
+  }).toString();
+  assert.equal(run({ tool_name: 'Edit', tool_input: { file_path: path.join(wsPath, 'x.js') } }), '', 'no output → Claude Code decides as usual');
+  const out = JSON.parse(run({ tool_name: 'Write', tool_input: { file_path: path.join(os.tmpdir(), 'outside.txt') } }));
+  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(out.hookSpecificOutput.permissionDecisionReason, /작업 폴더 밖/);
+  const settings = guardSettings();
+  assert.match(settings.hooks.PreToolUse[0].matcher, /Bash/);
+  assert.match(settings.hooks.PreToolUse[0].hooks[0].command, /guard-hook\.js/);
+  const args = buildClaudeArgs({ permission_mode: 'auto', session_id: null }, 'mcp.json', { settingsPath: 's.json' });
+  assert.equal(args[args.indexOf('--settings') + 1], 's.json');
+  const planArgs = buildClaudeArgs({ permission_mode: 'auto', session_id: null }, 'mcp.json', { settingsPath: 's.json', stage: 'plan' });
+  assert.equal(planArgs.includes('--settings'), false, 'plan turns cannot edit, so no hook');
 });
 
 test('turn snapshots capture tracked + untracked files and undo restores the exact previous tree', async () => {

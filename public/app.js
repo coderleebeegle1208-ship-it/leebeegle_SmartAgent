@@ -1363,12 +1363,16 @@
         else if (ap.tool_name === 'Write') body = `<div class="cmd"><i>${ICON.file}</i><span>${esc(shortPath(input.file_path))}</span></div><div class="diff">${esc(String(input.content || '').slice(0, 1500))}</div>`;
         else if (input.file_path) body = `<div class="cmd"><i>${ICON.file}</i><span>${esc(shortPath(input.file_path))}</span></div>`;
         else body = `<div class="diff">${esc(JSON.stringify(input, null, 1).slice(0, 1500))}</div>`;
-        card.innerHTML = head + `<h2>${esc(ap.tool_name)} 실행 승인</h2>${body}
+        const risky = ap.risk === 'outside';
+        if (risky) card.classList.add('risk');
+        const warn = risky ? `<div class="risk-note">작업 폴더 밖을 바꾸는 요청입니다. 허용하면 되돌리기로 복구할 수 없습니다.</div>` : '';
+        card.innerHTML = head + `<h2>${esc(ap.tool_name)} 실행 승인</h2>${warn}${body}
           <input class="reason" placeholder="거부 사유 (선택)">
-          <div class="btns"><button class="btn ghost" data-deny>거부</button><button class="btn primary" data-allow>허용</button></div>
-          <button type="button" class="btn allow-all" data-allow-run>이번 작업 동안 모두 허용<small>끝날 때까지 남은 요청을 묻지 않습니다</small></button>`;
+          <div class="btns"><button class="btn ghost" data-deny>거부</button><button class="btn primary" data-allow>${risky ? '그래도 허용' : '허용'}</button></div>
+          ${risky ? '' : '<button type="button" class="btn allow-all" data-allow-run>이번 작업 동안 모두 허용<small>끝날 때까지 남은 요청을 묻지 않습니다</small></button>'}`;
         card.querySelector('[data-allow]').onclick = () => decide(ap.id, 'allow');
-        card.querySelector('[data-allow-run]').onclick = () => decide(ap.id, 'allow', { scope: 'run' });
+        const allowRun = card.querySelector('[data-allow-run]');
+        if (allowRun) allowRun.onclick = () => decide(ap.id, 'allow', { scope: 'run' });
         card.querySelector('[data-deny]').onclick = () => decide(ap.id, 'deny', { message: card.querySelector('.reason').value.trim() });
       }
       host.appendChild(card);

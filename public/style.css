@@ -625,3 +625,8 @@ dialog.sheet { position: fixed; inset: auto 0 0 0; margin: 0 auto; width: min(10
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
+
+/* 작업 폴더 밖 변경 승인: 되돌리기가 못 잡는 요청이라 카드 자체를 빨갛게 */
+.approve.risk { border-color: #e5484d; background: #fff5f5; }
+.approve.risk .k { color: #c62828; }
+.approve .risk-note { margin: 8px 0 4px; padding: 8px 10px; border-radius: 10px; background: #ffe5e5; color: #b71c1c; font-size: 13px; font-weight: 600; line-height: 1.4; }

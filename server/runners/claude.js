@@ -164,9 +164,19 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
     })
   );
 
-  const args = buildClaudeArgs(agent, mcpPath, opts);
+  // PreToolUse 훅: 작업 폴더 밖을 바꾸는 요청은 허용 방식(auto/acceptEdits)과 상관없이 폰 승인을 거친다.
+  const settingsPath = path.join(mcpDir, `agent-${agent.id}-settings.json`);
+  fs.writeFileSync(settingsPath, JSON.stringify(guardSettings()));
+
+  const args = buildClaudeArgs(agent, mcpPath, { ...opts, settingsPath });
 
   const env = cleanClaudeEnv(cfg);
+  Object.assign(env, {
+    APPROVER_URL: `http://127.0.0.1:${cfg.port}`,
+    APPROVER_TOKEN: cfg.internalToken,
+    APPROVER_AGENT_ID: String(agent.id),
+    APPROVER_WORKSPACE: workspace.path,
+  });
 
   const bin = findClaudeBin();
   hooks.onLog?.(`spawn ${bin} ${args.map((a) => (a.includes(' ') ? JSON.stringify(a) : a)).join(' ')}`);
@@ -275,6 +285,17 @@ export function claudeStdinText(text, opts = {}) {
   return skip ? text : withPhoneReminderShort(text);
 }
 
+/** Hook config handed to every turn via --settings. The hook itself decides whether to ask; a
+ * long timeout lets it wait for the owner instead of Claude Code denying after 60 seconds. */
+export function guardSettings() {
+  const command = `"${process.execPath}" "${path.join(SERVER_DIR, 'guard-hook.js')}"`;
+  return {
+    hooks: {
+      PreToolUse: [{ matcher: 'Write|Edit|MultiEdit|NotebookEdit|Bash|PowerShell', hooks: [{ type: 'command', command, timeout: 86_400 }] }],
+    },
+  };
+}
+
 export function buildClaudeArgs(agent, mcpPath, opts = {}) {
   // `capture` only writes into data/captures on this PC, so it never needs a phone approval.
   // WebFetch is also pre-allowed: it's read-only, and a link the user attaches should just get read.
@@ -292,6 +313,7 @@ export function buildClaudeArgs(agent, mcpPath, opts = {}) {
   // prompt + tool + skill definitions from zero; skills add nothing when the turn can't edit anyway.
   if (isPlanOrReview) args.push('--disable-slash-commands');
   if (opts.budgetUsd) args.push('--max-budget-usd', String(opts.budgetUsd));
+  if (opts.settingsPath && !isPlanOrReview) args.push('--settings', opts.settingsPath);
   if (opts.tools) {
     const tools = Array.isArray(opts.tools) ? opts.tools : [opts.tools];
     args.push('--tools', ...tools);
