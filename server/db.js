@@ -80,6 +80,14 @@ CREATE TABLE IF NOT EXISTS turn_snapshots (
   undone_at INTEGER,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS saved_prompts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  text TEXT NOT NULL,
+  uses INTEGER NOT NULL DEFAULT 0,
+  last_used_at INTEGER,
+  created_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT
@@ -264,6 +272,23 @@ export const Snapshots = {
     db.prepare('DELETE FROM turn_snapshots WHERE agent_id = ? AND id NOT IN (SELECT id FROM turn_snapshots WHERE agent_id = ? ORDER BY id DESC LIMIT ?)').run(aid, aid, keep),
 };
 
+export const SavedPrompts = {
+  all: () => db.prepare('SELECT * FROM saved_prompts ORDER BY uses DESC, last_used_at DESC, id DESC').all(),
+  get: (id) => db.prepare('SELECT * FROM saved_prompts WHERE id = ?').get(id),
+  create: (title, text) => {
+    const r = db.prepare('INSERT INTO saved_prompts (title, text, created_at) VALUES (?, ?, ?)').run(title, text, now());
+    return SavedPrompts.get(Number(r.lastInsertRowid));
+  },
+  update: (id, fields) => {
+    const keys = Object.keys(fields);
+    if (!keys.length) return SavedPrompts.get(id);
+    db.prepare(`UPDATE saved_prompts SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...keys.map((k) => fields[k]), id);
+    return SavedPrompts.get(id);
+  },
+  touch: (id) => db.prepare('UPDATE saved_prompts SET uses = uses + 1, last_used_at = ? WHERE id = ?').run(now(), id),
+  remove: (id) => db.prepare('DELETE FROM saved_prompts WHERE id = ?').run(id),
+};
+
 export const Settings = {
   get: (key, fallback = null) => {
     const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
@@ -288,6 +313,20 @@ export function dailyActivity(sinceMs, untilMs = now()) {
     ORDER BY a.updated_at DESC
   `).all(sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs)
     .filter((r) => r.requests > 0 || r.fresh > 0);
+}
+
+/** Per-local-day totals inside a range (for the week/month cost view). Days with nothing are omitted. */
+export function dailyTotals(sinceMs, untilMs = now()) {
+  return db.prepare(`
+    SELECT date(created_at / 1000, 'unixepoch', 'localtime') AS date,
+           SUM(role = 'user') AS requests,
+           SUM(role = 'error') AS errors,
+           COALESCE(SUM(CASE WHEN role = 'usage' THEN COALESCE(json_extract(meta, '$.total.fresh'), json_extract(meta, '$.total.input') + json_extract(meta, '$.total.output') + json_extract(meta, '$.total.cacheWrite')) END), 0) AS fresh,
+           SUM(CASE WHEN role = 'usage' THEN json_extract(meta, '$.total.cost') END) AS cost
+    FROM messages WHERE created_at >= ? AND created_at < ?
+    GROUP BY date HAVING requests > 0 OR fresh > 0
+    ORDER BY date
+  `).all(sinceMs, untilMs);
 }
 
 export default db;

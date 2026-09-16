@@ -4,6 +4,7 @@
 // Both are checked every 30s; a missed minute (server was down, agent was busy) is retried for
 // up to GRACE_MS so a schedule does not silently skip a day.
 import { Agents, Messages, Schedules, Settings } from './db.js';
+import { backupIfDue } from './backup.js';
 import { emit } from './bus.js';
 import { sendPush } from './push.js';
 import { startPrompt } from './runners/index.js';
@@ -113,6 +114,7 @@ export function tick(cfg, now = Date.now()) {
       sendDigestPush(localDate(new Date(due))).catch((e) => console.error('[digest]', e.message));
     }
   }
+  try { backupIfDue(cfg, now); } catch (e) { console.error('[backup]', e.message); }
 }
 
 export function startScheduler(cfg) {

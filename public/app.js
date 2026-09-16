@@ -858,6 +858,7 @@
       </div>
       <div class="menu-popover" id="attach-popover" role="menu" hidden>
         <div class="menu-head">첨부</div>
+        <button type="button" class="menu-item" id="attach-saved"><span><b>자주 쓰는 지시</b><small>저장해 둔 지시 골라 넣기</small></span></button>
         <button type="button" class="menu-item" id="attach-pick"><span><b>사진·동영상 선택</b><small>갤러리에서 고르기</small></span></button>
         <button type="button" class="menu-item" id="attach-camera"><span><b>카메라로 찍기</b><small>바로 촬영</small></span></button>
         <button type="button" class="menu-item" id="attach-link"><span><b>링크 추가</b><small>웹페이지 주소 붙여넣기</small></span></button>
@@ -915,6 +916,7 @@
       $('#attach-input').onchange = (e) => { handleFiles(state.detail.agent.id, e.target.files); e.target.value = ''; };
       $('#attach-camera-input').onchange = (e) => { handleFiles(state.detail.agent.id, e.target.files); e.target.value = ''; };
       $('#attach-skill').onclick = () => { closeAttachMenu(); openSkillMenu(''); };
+      $('#attach-saved').onclick = () => { closeAttachMenu(); openSavedPrompts(); };
       $('#blanket-off').onclick = async () => {
         try { await api(`/agents/${state.detail.agent.id}/blanket`, { method: 'POST', body: { on: false } }); toast('다음 요청부터 다시 승인을 받습니다'); }
         catch (e) { toast(e.message); }
@@ -1940,25 +1942,98 @@
     try { await api(`/schedules/${schedEditing.id}`, { method: 'DELETE' }); toast('삭제했습니다'); showSchedList(); refreshSchedules(); } catch (e) { toast(e.message); }
   };
 
+  // ---------- 자주 쓰는 지시 ----------
+  let promptEditing = null;
+  function showPromptList() { $('#prompt-list-view').hidden = false; $('#prompt-edit-view').hidden = true; }
+  async function refreshSavedPrompts() {
+    const host = $('#prompt-list');
+    let data;
+    try { data = await api('/prompts'); } catch (e) { host.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
+    if (!data.prompts.length) { host.innerHTML = '<div class="row-empty">아직 저장한 지시가 없습니다. 입력창에 적은 뒤 「새로 저장」을 누르세요.</div>'; return; }
+    host.innerHTML = data.prompts.map((p) => `
+      <div class="sched-row" data-id="${p.id}">
+        <button type="button" class="sched-main" data-use>
+          <b>${esc(p.title)}</b><span class="sched-days">${p.uses ? `${p.uses}번 사용` : ''}</span>
+          <small>${esc(p.text.replace(/\s+/g, ' ').slice(0, 90))}</small>
+        </button>
+        <button type="button" class="tb" data-edit aria-label="편집">${ICON.pencil}</button>
+      </div>`).join('');
+    host.querySelectorAll('.sched-row').forEach((row) => {
+      const id = Number(row.dataset.id);
+      const p = data.prompts.find((x) => x.id === id);
+      row.querySelector('[data-use]').onclick = () => {
+        const ta = $('#prompt');
+        if (!ta) return;
+        ta.value = ta.value.trim() ? `${ta.value.replace(/\s+$/, '')}\n${p.text}` : p.text;
+        ta.dispatchEvent(new Event('input'));
+        $('#dlg-prompts').close();
+        ta.focus();
+        api(`/prompts/${id}/use`, { method: 'POST' }).catch(() => {});
+      };
+      row.querySelector('[data-edit]').onclick = () => openPromptEdit(p);
+    });
+  }
+  function openPromptEdit(p) {
+    promptEditing = p || null;
+    $('#prompt-edit-title').textContent = p ? '지시 편집' : '지시 저장';
+    $('#prompt-title').value = p?.title || '';
+    $('#prompt-text').value = p ? p.text : ($('#prompt')?.value || '').trim();
+    $('#prompt-delete').hidden = !p;
+    $('#prompt-list-view').hidden = true; $('#prompt-edit-view').hidden = false;
+    (p || $('#prompt-text').value ? $('#prompt-title') : $('#prompt-text')).focus();
+  }
+  function openSavedPrompts() {
+    showPromptList();
+    $('#prompt-list').innerHTML = '<div class="row-empty">불러오는 중…</div>';
+    $('#dlg-prompts').showModal();
+    refreshSavedPrompts();
+  }
+  $('#prompt-new').onclick = () => openPromptEdit(null);
+  $('#prompt-cancel').onclick = showPromptList;
+  $('#prompt-save').onclick = async () => {
+    const body = { title: $('#prompt-title').value.trim(), text: $('#prompt-text').value.trim() };
+    if (!body.text) return toast('지시 내용을 입력하세요');
+    try {
+      if (promptEditing) await api(`/prompts/${promptEditing.id}`, { method: 'PATCH', body });
+      else await api('/prompts', { method: 'POST', body });
+      toast('저장했습니다'); showPromptList(); refreshSavedPrompts();
+    } catch (e) { toast(e.message); }
+  };
+  $('#prompt-delete').onclick = async () => {
+    if (!promptEditing || !confirm('이 지시를 삭제할까요?')) return;
+    try { await api(`/prompts/${promptEditing.id}`, { method: 'DELETE' }); toast('삭제했습니다'); showPromptList(); refreshSavedPrompts(); } catch (e) { toast(e.message); }
+  };
+
   // ---------- 오늘 한 일 요약 ----------
   function digestCardHTML(d) {
     if (!d) return '';
     const t = d.totals;
     if (!d.agents.length) return `<span class="dg-k">오늘 한 일</span><span class="dg-v">아직 지시한 작업이 없습니다</span>${ICON.chev}`;
     const bits = [`지시 ${t.requests}건`, t.files ? `파일 ${t.files}개 수정` : null, t.errors ? `오류 ${t.errors}건` : null, fmtUsd(t.cost)].filter(Boolean).join(' · ');
-    return `<span class="dg-k">오늘 한 일</span><span class="dg-v"><b>에이전트 ${d.agents.length}개</b> · ${esc(bits)}</span>${ICON.chev}`;
+    const month = state.digestMonth && fmtUsd(state.digestMonth.totals.cost) ? ` · 이달 ${fmtUsd(state.digestMonth.totals.cost)}` : '';
+    return `<span class="dg-k">오늘 한 일</span><span class="dg-v"><b>에이전트 ${d.agents.length}개</b> · ${esc(bits)}${esc(month)}</span>${ICON.chev}`;
   }
   async function loadDigestCard() {
     try {
-      state.digest = await api('/digest');
+      [state.digest, state.digestMonth] = await Promise.all([api('/digest'), api('/digest?period=month').catch(() => null)]);
       const card = $('#digest-card');
       if (card) { card.innerHTML = digestCardHTML(state.digest); card.hidden = false; }
     } catch {}
   }
   let digestDate = null;
+  let digestPeriod = 'day';
+  function digestDaysHTML(d) {
+    if (!d.days?.length) return '';
+    const max = Math.max(...d.days.map((x) => x.cost || 0), 0.0001);
+    const rows = d.days.map((x) => {
+      const day = new Date(`${x.date}T00:00:00`);
+      return `<div class="dg-day"><b>${day.getMonth() + 1}/${day.getDate()} ${DAY_LABELS[day.getDay()]}</b><div class="bar"><i style="width:${Math.round(((x.cost || 0) / max) * 100)}%"></i></div><span>지시 ${x.requests}건 · ${fmtUsd(x.cost) || '—'}</span></div>`;
+    }).join('');
+    return `<div class="dg-sub">날짜별</div><div class="dg-days">${rows}</div><div class="dg-sub">에이전트별</div>`;
+  }
   function digestBodyHTML(d) {
     const t = d.totals;
-    if (!d.agents.length) return '<div class="row-empty">이날은 지시한 작업이 없었습니다.</div>';
+    if (!d.agents.length) return `<div class="row-empty">${d.period === 'day' ? '이날은' : '이 기간에는'} 지시한 작업이 없었습니다.</div>`;
     const head = `<div class="dg-totals">
       <div><b>${t.requests}</b><span>지시</span></div>
       <div><b>${t.files}</b><span>파일 수정</span></div>
@@ -1972,34 +2047,58 @@
         <div class="dg-row-m">지시 ${a.requests}건${a.files ? ` · 파일 ${a.files}개` : ''}${a.errors ? ` · 오류 ${a.errors}건` : ''}${a.fresh ? ` · 새 토큰 ${fmtTokens(a.fresh)}` : ''}${fmtUsd(a.cost) ? ` · ${fmtUsd(a.cost)}` : ''}</div>
         ${a.last_reply ? `<div class="dg-row-s">${esc(a.last_reply)}</div>` : ''}
       </button>`).join('');
-    return head + rows;
+    return head + digestDaysHTML(d) + rows;
   }
-  async function openDigest(date) {
+  function digestLabel(d) {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const day = new Date(`${d.date}T00:00:00`);
+    if (d.period === 'week') {
+      const to = new Date(`${d.to}T00:00:00`);
+      const thisWeek = day.getTime() <= today.getTime() && today.getTime() <= to.getTime();
+      return thisWeek ? '이번 주 한 일' : `${day.getMonth() + 1}/${day.getDate()}~${to.getMonth() + 1}/${to.getDate()} 한 일`;
+    }
+    if (d.period === 'month') {
+      const thisMonth = day.getFullYear() === today.getFullYear() && day.getMonth() === today.getMonth();
+      return thisMonth ? '이번 달 한 일' : `${day.getFullYear() !== today.getFullYear() ? `${day.getFullYear()}년 ` : ''}${day.getMonth() + 1}월 한 일`;
+    }
+    const label = day.getTime() === today.getTime() ? '오늘' : day.getTime() === today.getTime() - 86400000 ? '어제' : `${day.getMonth() + 1}월 ${day.getDate()}일`;
+    return `${label} 한 일`;
+  }
+  async function openDigest(date, period = digestPeriod) {
     digestDate = date || null;
+    digestPeriod = period;
     const dlg = $('#dlg-digest');
+    $('#digest-period').querySelectorAll('[data-period]').forEach((b) => b.classList.toggle('on', b.dataset.period === period));
+    $('#digest-prev').textContent = { day: '전날', week: '전주', month: '전달' }[period];
+    $('#digest-next').textContent = { day: '다음날', week: '다음 주', month: '다음 달' }[period];
     $('#digest-body').innerHTML = '<div class="row-empty">불러오는 중…</div>';
     if (!dlg.open) dlg.showModal();
     try {
-      const d = await api(`/digest${digestDate ? `?date=${encodeURIComponent(digestDate)}` : ''}`);
+      const q = new URLSearchParams();
+      if (digestDate) q.set('date', digestDate);
+      if (period !== 'day') q.set('period', period);
+      const d = await api(`/digest${q.size ? `?${q}` : ''}`);
       digestDate = d.date;
       const today = new Date(); today.setHours(0, 0, 0, 0);
-      const day = new Date(`${d.date}T00:00:00`);
-      const label = day.getTime() === today.getTime() ? '오늘' : day.getTime() === today.getTime() - 86400000 ? '어제' : `${day.getMonth() + 1}월 ${day.getDate()}일`;
-      $('#digest-title').textContent = `${label} 한 일`;
-      $('#digest-next').disabled = day.getTime() >= today.getTime();
+      const last = new Date(`${d.to || d.date}T00:00:00`);
+      $('#digest-title').textContent = digestLabel(d);
+      $('#digest-next').disabled = last.getTime() >= today.getTime();
       $('#digest-body').innerHTML = digestBodyHTML(d);
       $('#digest-body').querySelectorAll('[data-agent]').forEach((el) => (el.onclick = () => { dlg.close(); go({ name: 'agent', id: Number(el.dataset.agent) }); }));
     } catch (e) {
       $('#digest-body').innerHTML = `<p class="error">${esc(e.message)}</p>`;
     }
   }
-  const shiftDigest = (days) => {
+  const shiftDigest = (dir) => {
     const d = new Date(`${digestDate}T00:00:00`);
-    d.setDate(d.getDate() + days);
+    if (digestPeriod === 'month') d.setMonth(d.getMonth() + dir);
+    else d.setDate(d.getDate() + dir * (digestPeriod === 'week' ? 7 : 1));
     openDigest(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
   };
   $('#digest-prev').onclick = () => shiftDigest(-1);
   $('#digest-next').onclick = () => shiftDigest(1);
+  // Switching period re-anchors on today so "이번 주/이번 달" is what opens first.
+  $('#digest-period').querySelectorAll('[data-period]').forEach((b) => (b.onclick = () => openDigest(null, b.dataset.period)));
 
   // ---------- settings & push ----------
   $('#btn-settings').onclick = () => {
@@ -2008,7 +2107,22 @@
     $('#set-codex').textContent = state.data?.tools.codex ? '설치됨' : '미설치';
     updatePushStatus();
     api('/digest').then((d) => { $('#digest-enabled').checked = !!d.settings.enabled; $('#digest-time').value = d.settings.time; }).catch(() => {});
+    loadBackupStatus();
     $('#dlg-settings').showModal();
+  };
+  const fmtBytes = (n) => (n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))}KB` : `${(n / 1024 / 1024).toFixed(1)}MB`);
+  async function loadBackupStatus() {
+    const el = $('#backup-status');
+    try {
+      const b = await api('/backup');
+      el.textContent = b.last ? `마지막 백업 ${ago(b.last.at)} · ${b.count}일치 보관 (${fmtBytes(b.bytes)})` : '아직 백업이 없습니다. 서버가 켜진 뒤 잠시 후 첫 백업이 됩니다.';
+    } catch (e) { el.textContent = e.message; }
+  }
+  $('#btn-backup-now').onclick = async () => {
+    const btn = $('#btn-backup-now');
+    btn.disabled = true;
+    try { await api('/backup', { method: 'POST' }); toast('백업했습니다'); loadBackupStatus(); } catch (e) { toast(e.message); }
+    btn.disabled = false;
   };
   const saveDigestSettings = async () => {
     try { await api('/digest/settings', { method: 'PATCH', body: { enabled: $('#digest-enabled').checked, time: $('#digest-time').value } }); toast('저장했습니다'); }

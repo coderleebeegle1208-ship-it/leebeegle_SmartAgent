@@ -8,13 +8,14 @@ import { WebSocketServer } from 'ws';
 import { loadConfig } from './config.js';
 import { PUBLIC_DIR, ROOT_DIR } from './paths.js';
 import { spawn } from 'node:child_process';
-import { AgentSessions, Workspaces, Agents, Messages, Approvals, PushSubs, Schedules, Settings, Snapshots } from './db.js';
+import { AgentSessions, Workspaces, Agents, Messages, Approvals, PushSubs, SavedPrompts, Schedules, Settings, Snapshots } from './db.js';
 import { bus, emit } from './bus.js';
 import { initPush, sendPush } from './push.js';
 import { gitSummary, gitCommitDiff, gitRemote, setGitRemote, restoreTree } from './git.js';
 import { requestApproval, waitForApproval, resolveApproval, setBlanketAllow, blanketAllow } from './approvals.js';
 import { DAY_LABEL, describeDays, digestSettings, isValidTime, nextDue, normalizeDays, runSchedule, sendDigestPush, startScheduler } from './scheduler.js';
 import { buildDigest } from './digest.js';
+import { backupStatus, runBackup } from './backup.js';
 import { startPrompt, stopAgent, isRunning, runningIds, executePlan, switchProvider, compactAgent } from './runners/index.js';
 import { findClaudeBin } from './runners/claude.js';
 import { findCodexEntry } from './runners/codex.js';
@@ -515,7 +516,7 @@ api.post('/schedules/:id/run', (req, res) => {
 // ---------- 오늘 한 일 요약 ----------
 api.get('/digest', (req, res) => {
   try {
-    res.json({ ...buildDigest(req.query.date ? String(req.query.date) : undefined), settings: digestSettings() });
+    res.json({ ...buildDigest(req.query.date ? String(req.query.date) : undefined, String(req.query.period || 'day')), settings: digestSettings() });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -531,6 +532,49 @@ api.patch('/digest/settings', (req, res) => {
     Settings.set('digest_time', req.body.time);
   }
   res.json(digestSettings());
+});
+
+// ---------- 자주 쓰는 지시 ----------
+const promptFields = (body) => {
+  const text = String(body?.text ?? '').trim();
+  const title = String(body?.title ?? '').trim() || text.replace(/\s+/g, ' ').slice(0, 24);
+  if (!text) throw new Error('지시 내용을 입력하세요');
+  return { title: title.slice(0, 40), text: text.slice(0, 4000) };
+};
+api.get('/prompts', (req, res) => res.json({ prompts: SavedPrompts.all() }));
+api.post('/prompts', (req, res) => {
+  try {
+    const { title, text } = promptFields(req.body);
+    res.json(SavedPrompts.create(title, text));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+api.patch('/prompts/:id', (req, res) => {
+  const p = SavedPrompts.get(Number(req.params.id));
+  if (!p) return res.status(404).json({ error: 'not found' });
+  try {
+    res.json(SavedPrompts.update(p.id, promptFields({ ...p, ...req.body })));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+api.post('/prompts/:id/use', (req, res) => {
+  const p = SavedPrompts.get(Number(req.params.id));
+  if (!p) return res.status(404).json({ error: 'not found' });
+  SavedPrompts.touch(p.id);
+  res.json(SavedPrompts.get(p.id));
+});
+api.delete('/prompts/:id', (req, res) => {
+  SavedPrompts.remove(Number(req.params.id));
+  res.json({ ok: true });
+});
+
+// ---------- 자동 백업 ----------
+api.get('/backup', (req, res) => res.json(backupStatus(cfg)));
+api.post('/backup', (req, res) => {
+  try {
+    const r = runBackup(cfg);
+    res.json({ ...r, status: backupStatus(cfg) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 api.post('/push/subscribe', (req, res) => {

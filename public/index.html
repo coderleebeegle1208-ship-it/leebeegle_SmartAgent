@@ -232,10 +232,41 @@
         <button class="btn" id="btn-digest-send">지금 알림 보내기</button>
       </div>
       <hr>
+      <h3>자동 백업</h3>
+      <p class="muted small">대화 기록과 설정을 매일 한 번 복사해 두고 최근 14일치를 보관합니다. PC가 켜져 있으면 그날 자동으로 됩니다.</p>
+      <div class="row-flex">
+        <span class="muted small" id="backup-status" style="flex:1">확인 중…</span>
+        <button class="btn" id="btn-backup-now">지금 백업</button>
+      </div>
+      <hr>
       <div class="row-flex">
         <button class="btn danger" id="btn-logout">토큰 지우기</button>
         <div class="spacer"></div>
         <button class="btn" data-close>닫기</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 자주 쓰는 지시 -->
+  <dialog id="dlg-prompts">
+    <div class="form" id="prompt-list-view">
+      <h2>자주 쓰는 지시</h2>
+      <p class="muted small">자주 보내는 지시를 저장해 두고 누르면 입력창에 바로 들어갑니다. 많이 쓴 순서로 보입니다.</p>
+      <div id="prompt-list"></div>
+      <div class="row-flex end">
+        <button class="btn" type="button" data-close>닫기</button>
+        <button class="btn primary" type="button" id="prompt-new">새로 저장</button>
+      </div>
+    </div>
+    <div class="form" id="prompt-edit-view" hidden>
+      <h2 id="prompt-edit-title">지시 저장</h2>
+      <label>이름 <input id="prompt-title" placeholder="예: 코드 리뷰" maxlength="40"></label>
+      <label>지시 내용 <textarea id="prompt-text" rows="4" placeholder="보낼 지시를 적어 두세요"></textarea></label>
+      <div class="row-flex end">
+        <button class="btn danger" type="button" id="prompt-delete" hidden>삭제</button>
+        <div class="spacer"></div>
+        <button class="btn" type="button" id="prompt-cancel">취소</button>
+        <button class="btn primary" type="button" id="prompt-save">저장</button>
       </div>
     </div>
   </dialog>
@@ -273,6 +304,11 @@
   <dialog id="dlg-digest">
     <div class="form">
       <h2 id="digest-title">오늘 한 일</h2>
+      <div class="seg" id="digest-period" role="tablist" aria-label="기간">
+        <button type="button" class="on" data-period="day" role="tab">하루</button>
+        <button type="button" data-period="week" role="tab">주간</button>
+        <button type="button" data-period="month" role="tab">월간</button>
+      </div>
       <div id="digest-body"></div>
       <div class="row-flex end">
         <button class="btn" type="button" id="digest-prev">전날</button>

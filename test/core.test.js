@@ -7,6 +7,7 @@ const fs = (await import('node:fs')).default;
 const path = (await import('node:path')).default;
 const os = (await import('node:os')).default;
 process.env.AGENT_REMOTE_CONFIG = path.join(os.tmpdir(), `agent-remote-test-config-${process.pid}.json`);
+process.env.AGENT_REMOTE_BACKUP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-remote-backups-'));
 
 const { AgentSessions, Agents, Messages, Workspaces } = await import('../server/db.js');
 const { buildClaudeArgs, claudeStdinText } = await import('../server/runners/claude.js');
@@ -772,7 +773,10 @@ test('agent menu button lives in the topbar and the sheet keeps all six actions'
 // ---------- 예약 실행 · 오늘 한 일 · 승인 묶음 · 되돌리기 ----------
 const { describeDays, lastDue, nextDue, normalizeDays, isValidTime, tick: schedulerTick } = await import('../server/scheduler.js');
 const { buildDigest, digestPushText, dayBounds } = await import('../server/digest.js');
-const { Approvals, Schedules, Snapshots, dailyActivity } = await import('../server/db.js');
+const { Approvals, SavedPrompts, Schedules, Snapshots, dailyActivity, dailyTotals } = await import('../server/db.js');
+const { periodBounds } = await import('../server/digest.js');
+const rawDb = (await import('../server/db.js')).default;
+const { backupIfDue, backupStatus, listBackups, runBackup } = await import('../server/backup.js');
 const { requestApproval, resolveApproval, setBlanketAllow, blanketAllow } = await import('../server/approvals.js');
 const { snapshotTree, treeChanges, restoreTree } = await import('../server/git.js');
 const { execFileSync } = await import('node:child_process');
@@ -908,4 +912,72 @@ test('phone UI wires the new features: allow-all button, undo card, mic, schedul
   assert.match(js, /webkitSpeechRecognition/);
   assert.match(js, /case 'blanket\.changed'/);
   assert.match(js, /q\.get\('digest'\)/);
+});
+
+test('period digest: week runs Mon–Sun, month is the calendar month, days roll up per local date', () => {
+  const w = periodBounds('week', '2025-03-13'); // Thursday, well before any other test's messages
+  assert.equal(w.from, '2025-03-10'); assert.equal(w.to, '2025-03-16');
+  const m = periodBounds('month', '2026-02-10');
+  assert.equal(m.from, '2026-02-01'); assert.equal(m.to, '2026-02-28');
+  assert.equal(periodBounds('bogus', '2026-09-17').period, 'day');
+  const ws = Workspaces.create('period-ws', path.join(os.tmpdir(), `period-ws-${process.pid}`));
+  const a = Agents.create(ws.id, 'claude', '기간봇');
+  const at = (s) => new Date(s).getTime();
+  // Insert with explicit timestamps through the raw DB so the days land where we expect.
+  const raw = rawDb;
+  const ins = raw.prepare('INSERT INTO messages (agent_id, role, content, meta, created_at) VALUES (?, ?, ?, ?, ?)');
+  ins.run(a.id, 'user', '월요일 지시', null, at('2025-03-10T10:00:00'));
+  ins.run(a.id, 'usage', 'u', JSON.stringify({ total: { fresh: 100, cost: 0.25 } }), at('2025-03-10T10:05:00'));
+  ins.run(a.id, 'user', '수요일 지시', null, at('2025-03-12T10:00:00'));
+  ins.run(a.id, 'usage', 'u', JSON.stringify({ total: { fresh: 300, cost: 0.75 } }), at('2025-03-12T10:05:00'));
+  ins.run(a.id, 'user', '지난주 지시', null, at('2025-03-07T10:00:00'));
+  const days = dailyTotals(w.since, w.until);
+  assert.deepEqual(days.map((d) => [d.date, d.requests, d.fresh, d.cost]), [['2025-03-10', 1, 100, 0.25], ['2025-03-12', 1, 300, 0.75]]);
+  const week = buildDigest('2025-03-13', 'week');
+  const mine = week.agents.find((r) => r.id === a.id);
+  assert.equal(mine.requests, 2, 'last week is excluded');
+  assert.equal(mine.cost, 1);
+  assert.equal(week.days.length, 2);
+  assert.equal(buildDigest('2026-09-17').days, undefined, 'day view has no per-day list');
+  Agents.remove(a.id); Workspaces.remove(ws.id);
+});
+
+test('saved prompts: ordered by use, title defaults to the text, validation rejects empty text', () => {
+  const p1 = SavedPrompts.create('리뷰', '어제 커밋 리뷰해줘');
+  const p2 = SavedPrompts.create('테스트', '테스트 돌려줘');
+  SavedPrompts.touch(p2.id);
+  assert.deepEqual(SavedPrompts.all().map((p) => p.id), [p2.id, p1.id]);
+  assert.equal(SavedPrompts.get(p2.id).uses, 1);
+  SavedPrompts.update(p1.id, { title: '코드 리뷰' });
+  assert.equal(SavedPrompts.get(p1.id).title, '코드 리뷰');
+  SavedPrompts.remove(p1.id); SavedPrompts.remove(p2.id);
+  assert.equal(SavedPrompts.all().length, 0);
+});
+
+test('backup: one consistent copy per local day, overwritten on rerun, old days pruned', () => {
+  const dir = process.env.AGENT_REMOTE_BACKUP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-remote-backups-'));
+  for (const d of ['2026-09-01', '2026-09-02', '2026-09-03']) runBackup({}, { date: d, keep: 10 });
+  assert.deepEqual(listBackups().map((b) => b.date), ['2026-09-03', '2026-09-02', '2026-09-01']);
+  assert.ok(fs.existsSync(path.join(dir, '2026-09-03', 'app.sqlite')));
+  const r = runBackup({}, { date: '2026-09-04', keep: 2 });
+  assert.equal(r.removed, 2);
+  assert.deepEqual(listBackups().map((b) => b.date), ['2026-09-04', '2026-09-03']);
+  assert.ok(runBackup({}, { date: '2026-09-04', keep: 2 }).bytes > 0, 'same-day rerun overwrites instead of failing');
+  const first = backupIfDue({});
+  assert.ok(first === null || first.date, 'first tick may back up');
+  assert.equal(backupIfDue({}), null, 'second tick the same day does nothing');
+  const st = backupStatus();
+  assert.ok(st.last && st.count >= 2 && st.keep > 0);
+});
+
+test('phone UI wires backup, saved prompts and the period digest', () => {
+  const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const js = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(html, /id="btn-backup-now"/);
+  assert.match(html, /id="dlg-prompts"/);
+  assert.match(html, /data-period="month"/);
+  assert.match(js, /id="attach-saved"/);
+  assert.match(js, /\/prompts\/\$\{id\}\/use/);
+  assert.match(js, /period=month/);
+  assert.match(js, /api\('\/backup', \{ method: 'POST' \}\)/);
 });
