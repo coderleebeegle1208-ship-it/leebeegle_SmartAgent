@@ -119,6 +119,7 @@
     ? statusLabel.needs_attention
     : agent?.collab_stage ? collabStageLabel[agent.collab_stage] || statusLabel[agent.status] : statusLabel[agent?.status] || agent?.status;
   const ICON = {
+    speaker: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg>',
     plus: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
     github: '<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38l-.01-1.34c-2.23.48-2.7-1.07-2.7-1.07-.36-.93-.89-1.18-.89-1.18-.73-.5.05-.49.05-.49.81.06 1.23.83 1.23.83.72 1.23 1.89.88 2.35.67.07-.52.28-.88.51-1.08-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48l-.01 2.2c0 .21.15.46.55.38A8 8 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>',
     file: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5"/></svg>',
@@ -230,6 +231,10 @@
       case 'agent.updated': {
         const i = state.data.agents.findIndex((a) => a.id === m.agent.id);
         const providerChanged = i >= 0 && state.data.agents[i].kind !== m.agent.kind;
+        const wasBusy = i >= 0 && ['working', 'needs_attention'].includes(state.data.agents[i].status);
+        if (wasBusy && ['done', 'error'].includes(m.agent.status) && ttsEnabled()) {
+          speak(`${m.agent.name}. ${m.agent.status === 'done' ? m.agent.last_response || '작업이 끝났습니다' : `문제가 생겼습니다. ${m.agent.last_error || ''}`}`);
+        }
         if (i >= 0) state.data.agents[i] = { ...state.data.agents[i], ...m.agent };
         else state.data.agents.unshift(m.agent);
         recount();
@@ -274,6 +279,14 @@
           renderAgentHead();
         }
         break;
+      case 'queue.changed': {
+        const a = state.data.agents.find((x) => x.id === m.agent_id);
+        if (a) a.queued = m.count;
+        if (state.route.name === 'agent' && state.detail?.agent.id === m.agent_id) {
+          api(`/agents/${m.agent_id}/queue`).then((q) => { if (state.detail?.agent.id === m.agent_id) { state.detail.queue = q; renderQueue(); } }).catch(() => {});
+        }
+        break;
+      }
       case 'snapshot.undone':
         if (state.route.name === 'agent' && state.detail?.agent.id === m.agent_id) loadDetail(m.agent_id, true);
         break;
@@ -549,7 +562,7 @@
       const groupLabel = hasPinned && (w.pinned ? 'pinned' : 'rest') !== lastGroup ? `<div class="glabel">${w.pinned ? '고정됨' : '최근 활동순'}</div>` : '';
       lastGroup = w.pinned ? 'pinned' : 'rest';
       const rows = list.map((a) => {
-        const snippet = a.collab_stage ? `${agentStatusText(a)} · 두 모델이 순서대로 작업하고 있습니다` : a.status === 'error' && a.last_error ? a.last_error : a.pending_approvals ? `승인 ${a.pending_approvals}건 대기 중` : a.last_response || '아직 지시한 작업이 없습니다.';
+        const snippet = (a.collab_stage ? `${agentStatusText(a)} · 두 모델이 순서대로 작업하고 있습니다` : a.status === 'error' && a.last_error ? a.last_error : a.pending_approvals ? `승인 ${a.pending_approvals}건 대기 중` : a.last_response || '아직 지시한 작업이 없습니다.') + (a.queued ? ` · 대기 ${a.queued}건` : '');
         return `
         <div class="row ${a.status === 'needs_attention' ? 'attn' : ''} ${a.status === 'error' ? 'error' : ''}" data-agent="${a.id}">
           <div class="g">${glyph(a.status)}</div>
@@ -852,6 +865,7 @@
       <div id="approvals"></div>
       <div class="progress" id="progress" hidden><span class="spin" aria-hidden="true"></span><span id="progress-text">작업 중</span><span id="progress-time" class="mono"></span><button type="button" class="progress-act" id="progress-blanket" hidden>남은 승인 모두 허용</button></div>
       <div class="blanketbar" id="blanketbar" hidden><span>이번 작업의 승인 요청을 자동으로 허용하는 중</span><button type="button" id="blanket-off">해제</button></div>
+      <div class="queuebar" id="queuebar" hidden></div>
       <div class="menu-popover" id="mode-popover" role="menu" hidden>
         <div class="menu-head" id="mode-title"></div>
         <div id="mode-items"></div>
@@ -1162,8 +1176,9 @@
     const pendingPlan = !!a.pending_plan;
     const running = !pendingPlan && (a.running || a.status === 'working' || a.status === 'needs_attention');
     const send = $('#send'), stop = $('#stop'), planbar = $('#planbar'), blanketbar = $('#blanketbar'), progressBlanket = $('#progress-blanket');
-    if (send) send.hidden = running;
+    if (send) { send.hidden = false; send.textContent = running ? '줄 세우기' : '보내기'; send.classList.toggle('queue-mode', running); }
     if (stop) stop.hidden = !running;
+    renderQueue();
     if (planbar) planbar.hidden = !pendingPlan;
     const blanket = running && !!a.blanket_allow;
     if (blanketbar) blanketbar.hidden = !blanket;
@@ -1268,8 +1283,11 @@
       const undone = state.detail?.undone?.has(meta.snapshot_id);
       el.className = `msg undo ${undone ? 'done' : ''}`;
       const diff = (meta.added || meta.removed) ? `<span class="diffstat"><ins>+${meta.added || 0}</ins> <del>-${meta.removed || 0}</del></span>` : '';
-      el.innerHTML = `<div class="undo-copy"><b>${esc(m.content)}</b>${diff}<small>${undone ? '작업 전 상태로 되돌렸습니다' : '마음에 들지 않으면 이 작업이 바꾼 파일을 한 번에 원래대로 돌릴 수 있습니다'}</small></div>
+      const files = Array.isArray(meta.deliverables) ? meta.deliverables : [];
+      el.innerHTML = `<div class="undo-copy"><b>${esc(m.content)}</b>${diff}<small>${undone ? '작업 전 상태로 되돌렸습니다' : '마음에 들지 않으면 이 작업이 바꾼 파일을 한 번에 원래대로 돌릴 수 있습니다'}</small>
+        ${files.length ? `<div class="deliver">${files.map((f) => `<button type="button" class="deliver-btn" data-path="${esc(f.path)}" data-name="${esc(f.name)}">${ICON.file}<span>${esc(f.name)}</span><small>${fmtSize(f.size)}</small></button>`).join('')}</div>` : ''}</div>
         <button type="button" class="btn undo-btn" ${undone ? 'disabled' : ''}>${undone ? '되돌림' : '원래대로 되돌리기'}</button>`;
+      el.querySelectorAll('.deliver-btn').forEach((b) => (b.onclick = () => shareFile(state.detail.agent.id, b.dataset.path, b.dataset.name)));
       el.querySelector('.undo-btn').onclick = async () => {
         if (!confirm(`이 작업이 바꾼 파일 ${meta.files || ''}개를 작업 전 상태로 되돌립니다. 그 뒤에 직접 고친 부분이 있으면 겹치는 곳은 되돌리지 못할 수 있습니다. 진행할까요?`)) return;
         const btn = el.querySelector('.undo-btn');
@@ -1293,7 +1311,9 @@
       const skillBadge = m.role === 'user' && meta.skill ? `<span class="msg-skill">스킬 · ${esc(meta.skill.name)}</span>` : '';
       el.innerHTML = source + skillBadge + (m.role === 'assistant' ? rich(m.content) : esc(m.content))
         + (m.role === 'user' ? messageAttachmentsHTML(meta) : '')
-        + (m.role === 'user' || m.role === 'assistant' ? `<span class="time">${clock(m.created_at)}</span>` : '');
+        + (m.role === 'user' || m.role === 'assistant' ? `<span class="time">${clock(m.created_at)}${m.role === 'assistant' && 'speechSynthesis' in window ? `<button type="button" class="speak-btn" aria-label="읽어주기">${ICON.speaker}</button>` : ''}</span>` : '');
+      const sp = el.querySelector('.speak-btn');
+      if (sp) sp.onclick = () => speak(m.content);
       el.querySelectorAll('.attachments .image-open').forEach((b) => (b.onclick = () => openLightbox(b.dataset.src, b.dataset.caption)));
     }
     if (folded) {
@@ -1319,6 +1339,48 @@
   }
   // The composer is fixed to the bottom, so the page needs a matching bottom gap; an approval
   // card can double its height, so measure instead of assuming.
+  const fmtSize = (n) => n >= 1e9 ? `${(n / 1e9).toFixed(1)}GB` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}MB` : n >= 1e3 ? `${Math.round(n / 1e3)}KB` : `${n}B`;
+  /** 결과물을 폰으로: 공유 시트가 되면 파일째 공유, 아니면 내려받기. */
+  async function shareFile(agentId, relPath, name) {
+    const url = `/api/agents/${agentId}/file?path=${encodeURIComponent(relPath)}&token=${encodeURIComponent(state.token)}`;
+    try {
+      if (navigator.share && navigator.canShare) {
+        toast('파일을 준비하는 중…');
+        const blob = await (await fetch(url)).blob();
+        const file = new File([blob], name, { type: blob.type || 'application/octet-stream' });
+        if (navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: name }); return; }
+      }
+    } catch (e) { if (e?.name === 'AbortError') return; }
+    window.open(url + '&download=1', '_blank');
+  }
+  /** 보고 읽어주기 (폰 내장 음성). */
+  const ttsEnabled = () => localStorage.getItem('ar_tts') === '1';
+  function speak(text) {
+    if (!('speechSynthesis' in window) || !text) return;
+    const clean = String(text).replace(/\*\*|`|#+\s|\[[^\]]*\]\([^)]*\)/g, '').replace(/\s+/g, ' ').trim().slice(0, 600);
+    if (!clean) return;
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(clean);
+    u.lang = 'ko-KR';
+    const ko = speechSynthesis.getVoices().find((v) => /^ko/i.test(v.lang));
+    if (ko) u.voice = ko;
+    u.rate = 1.05;
+    speechSynthesis.speak(u);
+  }
+  /** 줄 서 있는 지시 목록. 각 줄의 ✕로 빼낼 수 있다. */
+  function renderQueue() {
+    const bar = $('#queuebar');
+    if (!bar) return;
+    const list = state.detail?.queue || [];
+    bar.hidden = !list.length;
+    bar.innerHTML = list.length ? `<div class="queue-head">대기 중 ${list.length}건 · 지금 작업이 끝나면 순서대로 시작</div>` + list.map((q, i) => `
+      <div class="queue-item"><span class="n">${i + 1}</span><span class="t">${esc(q.text || '(첨부만)')}</span><button type="button" class="x" data-qid="${q.id}" aria-label="빼기">✕</button></div>`).join('') : '';
+    bar.querySelectorAll('[data-qid]').forEach((b) => (b.onclick = async () => {
+      try { await api(`/agents/${state.detail.agent.id}/queue/${b.dataset.qid}`, { method: 'DELETE' }); toast('대기열에서 뺐습니다'); }
+      catch (e) { toast(e.message); }
+    }));
+    syncComposerSpace();
+  }
   function syncComposerSpace() {
     const composer = document.querySelector('.composer');
     document.body.style.paddingBottom = composer ? `${composer.offsetHeight + 12}px` : '';
@@ -1397,7 +1459,8 @@
     const links = draft.links.slice();
     if (!text && !attachments.length && !links.length) return;
     try {
-      await api(`/agents/${agentId}/prompt`, { method: 'POST', body: { text, attachments, links } });
+      const r = await api(`/agents/${agentId}/prompt`, { method: 'POST', body: { text, attachments, links } });
+      if (r?.queued_now) toast(`대기열 ${r.queued_now}번째로 넣었습니다. 지금 작업이 끝나면 이어서 합니다`);
       ta.value = '';
       ta.style.height = 'auto';
       delete state.draft[agentId];
@@ -2112,7 +2175,12 @@
     updatePushStatus();
     api('/digest').then((d) => { $('#digest-enabled').checked = !!d.settings.enabled; $('#digest-time').value = d.settings.time; }).catch(() => {});
     loadBackupStatus();
+    $('#tts-enabled').checked = ttsEnabled();
     $('#dlg-settings').showModal();
+  };
+  $('#tts-enabled').onchange = (e) => {
+    localStorage.setItem('ar_tts', e.target.checked ? '1' : '0');
+    if (e.target.checked) speak('완료 보고를 읽어드리겠습니다.');
   };
   const fmtBytes = (n) => (n < 1024 * 1024 ? `${Math.max(1, Math.round(n / 1024))}KB` : `${(n / 1024 / 1024).toFixed(1)}MB`);
   async function loadBackupStatus() {

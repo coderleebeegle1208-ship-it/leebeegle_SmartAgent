@@ -4,7 +4,8 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../paths.js';
-import { AgentSessions, Agents, Messages, Snapshots, Workspaces } from '../db.js';
+import { AgentSessions, Agents, Messages, Snapshots, Workspaces, Queue } from '../db.js';
+import { explainError, errorMessageText } from '../errors.js';
 import { emit } from '../bus.js';
 import { sendPush } from '../push.js';
 import { expireApprovals, setBlanketAllow } from '../approvals.js';
@@ -23,6 +24,10 @@ const live = new Map(); // agentId -> { child, cancelled }
 const usageAcc = new Map(); // agentId -> stage usage rows for the run in progress
 const turnSnap = new Map(); // agentId -> turn_snapshots row taken before the run in progress
 const runWatch = new Map(); // agentId -> cost/loop watch for the run in progress (spans plan + exec)
+const retried = new Set(); // agentIds whose current run already got its one automatic retry
+const RETRY_DELAY_MS = 20_000;
+// 폰으로 바로 받아볼 만한 결과물. 코드·설정 파일은 제외.
+const DELIVERABLE_RE = /\.(mp4|mov|webm|mp3|wav|m4a|pdf|png|jpe?g|gif|webp|svg|html?|docx?|xlsx?|pptx?|csv|zip|srt|md|txt)$/i;
 const CONVO_ROLES = ['user', 'assistant', 'plan', 'handoff']; // the roles compactConversation actually reads
 const KIND_LABEL = { claude: 'Claude', codex: 'Codex' };
 const STAGE_LABEL = { implement: '구현', review: '교차 리뷰', revise: '최종 수정' };
@@ -316,6 +321,14 @@ export function isUsageLimitError(result) {
   return /rate[_ -]?limit|usage limit|quota|too many requests|insufficient_quota|weekly limit|5-hour limit|한도.{0,8}(소진|초과|도달)|사용량.{0,8}(소진|초과|도달)/i.test(text);
 }
 
+/** Network blips, overloaded API, a crashed CLI: worth one automatic retry. */
+export function isTransientError(result) {
+  if (!result || result.ok) return false;
+  if (result.subtype === 'error_max_turns' || result.subtype === 'error_max_budget_usd') return false;
+  const text = [result.text, result.subtype, result.error, result.crashed ? 'crashed' : ''].filter(Boolean).join(' ');
+  return explainError(text).transient;
+}
+
 /** The CLI's result subtype when --max-budget-usd cuts a plan turn off mid-run. */
 function isPlanBudgetExceeded(result) {
   return result?.subtype === 'error_max_budget_usd';
@@ -338,6 +351,19 @@ export function failoverContinuation(text, planContent) {
 
 async function completeOrFailover(agentId, result, originalText, cfg, allowFailover, planStartMessageId = null) {
   const agent = Agents.get(agentId);
+  if (agent && result && !result.ok && !result.stopped && !isUsageLimitError(result) && !retried.has(agentId) && isTransientError(result)) {
+    // 잠깐 기다렸다 같은 대화를 이어서 한 번 더. 두 번째도 실패하면 그때 오류로 알린다.
+    retried.add(agentId);
+    const { plain } = explainError([result.text, result.subtype, result.error].filter(Boolean).join(' '));
+    note(agentId, `${plain} · ${Math.round(RETRY_DELAY_MS / 1000)}초 뒤 자동으로 한 번 더 시도합니다`);
+    await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+    if (!Agents.get(agentId)) return;
+    const efforts = stageEfforts(agent);
+    const model = agent.pipeline === 'auto' ? agent.exec_model : agent.model;
+    const effort = agent.pipeline === 'auto' ? efforts.exec : agent.effort || null;
+    const again = await runTurn(agentId, '직전 작업이 일시적인 오류로 끊겼습니다. 이미 된 부분은 건너뛰고 남은 일을 이어서 마무리하세요.', cfg, { stage: 'exec', model, effort });
+    return completeOrFailover(agentId, again, originalText, cfg, allowFailover, planStartMessageId);
+  }
   if (!agent || !allowFailover || !agent.auto_failover || !isUsageLimitError(result)) {
     return finish(agentId, result);
   }
@@ -637,12 +663,52 @@ async function snapshotAfter(agentId) {
     Snapshots.prune(agentId);
     if (!changes.files.length) return;
     const names = changes.files.slice(0, 5).map((f) => path.basename(f)).join(', ') + (changes.files.length > 5 ? ' 외' : '');
+    const deliverables = deliverableFiles(workspace.path, changes.files);
     const m = Messages.add(agentId, 'undo', `이번 작업으로 파일 ${changes.files.length}개가 바뀌었습니다 · ${names}`, {
       snapshot_id: snap.id, files: changes.files.length, added: changes.added, removed: changes.removed,
+      ...(deliverables.length ? { deliverables } : {}),
     });
     emit('message', { agent_id: agentId, message: m });
   } catch (e) {
     console.error('[snapshot]', e.message);
+  }
+}
+
+/** Changed files the owner would want on the phone (videos, PDFs, images, docs…), with sizes. */
+export function deliverableFiles(workspacePath, files, limit = 8) {
+  const out = [];
+  for (const rel of files) {
+    if (!DELIVERABLE_RE.test(rel)) continue;
+    const abs = path.join(workspacePath, rel);
+    try {
+      const st = fs.statSync(abs);
+      if (!st.isFile()) continue;
+      out.push({ path: rel.replace(/\\/g, '/'), name: path.basename(rel), size: st.size });
+    } catch {}
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/** 앞선 작업이 끝났으니 줄 서 있던 다음 지시를 시작한다. 정리 중이면 잠깐 뒤에 다시. */
+function drainQueue(agentId, cfg, attempt = 0) {
+  const next = Queue.forAgent(agentId)[0];
+  if (!next) return;
+  const agent = Agents.get(agentId);
+  if (!agent || live.has(agentId) || agent.status === 'working' || agent.pending_plan) return;
+  if (compacting.has(agentId)) {
+    if (attempt < 30) setTimeout(() => drainQueue(agentId, cfg, attempt + 1), 2000);
+    return;
+  }
+  Queue.remove(next.id);
+  emit('queue.changed', { agent_id: agentId, count: Queue.forAgent(agentId).length });
+  let extra = {};
+  try { extra = next.extra_json ? JSON.parse(next.extra_json) : {}; } catch {}
+  note(agentId, `대기열 · 줄 서 있던 다음 지시를 시작합니다${Queue.forAgent(agentId).length ? ` (남은 ${Queue.forAgent(agentId).length}건)` : ''}`);
+  try {
+    startPrompt(agentId, next.text, cfg, extra);
+  } catch (e) {
+    note(agentId, `대기열 지시를 시작하지 못했습니다 · ${e.message}`);
   }
 }
 
@@ -656,8 +722,9 @@ function finish(agentId, r, opts = {}) {
   if (!r) return;
   if (r.ok) setTimeout(() => maybeAutoCompact(agentId, opts.cfg || lastCfg), 500);
   const ok = !!r.ok;
+  retried.delete(agentId);
   if (!ok && !r.stopped) {
-    const errorText = r.text || r.subtype || '문제가 발생했습니다.';
+    const errorText = errorMessageText(r.text || r.subtype || '문제가 발생했습니다.');
     const last = Messages.forAgent(agentId, 1)[0];
     if (last?.role !== 'error' || last.content !== errorText) {
       const message = Messages.add(agentId, 'error', errorText, r.provider ? { provider: r.provider, ...(r.phase ? { phase: r.phase } : {}) } : null);
@@ -671,7 +738,9 @@ function finish(agentId, r, opts = {}) {
     pending_plan: 0,
     collab_stage: null,
   });
-  push(a, opts.title || (ok ? '완료' : r.stopped ? '멈춤 · 확인 필요' : '오류'), r.text || (ok ? '작업이 끝났습니다.' : '문제가 발생했습니다.'));
+  push(a, opts.title || (ok ? '완료' : r.stopped ? '멈춤 · 확인 필요' : '오류'), ok ? r.text || '작업이 끝났습니다.' : r.stopped ? r.text : errorMessageText(r.text || '문제가 발생했습니다.'));
+  // 줄 서 있던 지시가 있으면 이어서. 감시 장치가 멈춘 경우는 대표 판단이 먼저라 이어가지 않는다.
+  if (!r.stopped) setTimeout(() => drainQueue(agentId, opts.cfg || lastCfg), 800);
   return r;
 }
 
@@ -687,6 +756,28 @@ function describeAttachments(attachments, links) {
 }
 
 let lastCfg = null;
+/** Busy agent: park the prompt; it starts by itself when the current run settles. */
+export function enqueuePrompt(agentId, text, extra = {}) {
+  const agent = Agents.get(agentId);
+  if (!agent) throw new Error('agent not found');
+  if (!text.trim() && !(extra.attachments || []).length && !(extra.links || []).length) throw new Error('내용이 없습니다');
+  const row = Queue.add(agentId, text, { attachments: extra.attachments || [], links: extra.links || [] });
+  const count = Queue.forAgent(agentId).length;
+  note(agentId, `대기열 · ${count}번째로 받아 두었습니다 · 지금 작업이 끝나면 이어서 시작합니다`);
+  emit('queue.changed', { agent_id: agentId, count });
+  return { row, count };
+}
+export function queuedPrompts(agentId) {
+  return Queue.forAgent(agentId).map((q) => ({ id: q.id, text: q.text, created_at: q.created_at }));
+}
+export function removeQueued(agentId, id) {
+  const q = Queue.get(id);
+  if (!q || q.agent_id !== agentId) return false;
+  Queue.remove(id);
+  emit('queue.changed', { agent_id: agentId, count: Queue.forAgent(agentId).length });
+  return true;
+}
+
 export function startPrompt(agentId, text, cfg, extra = {}) {
   lastCfg = cfg;
   const agent = Agents.get(agentId);

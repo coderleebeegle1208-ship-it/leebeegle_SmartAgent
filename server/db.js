@@ -92,6 +92,13 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+CREATE TABLE IF NOT EXISTS prompt_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  text TEXT NOT NULL,
+  extra_json TEXT,            -- { attachments, links } as handed to startPrompt
+  created_at INTEGER NOT NULL
+);
 `);
 
 // Lightweight migrations for columns added after the first release.
@@ -271,6 +278,24 @@ export const Snapshots = {
   /** Keeps only the newest `keep` rows per agent so the table (and the git objects it references) stay small. */
   prune: (aid, keep = 30) =>
     db.prepare('DELETE FROM turn_snapshots WHERE agent_id = ? AND id NOT IN (SELECT id FROM turn_snapshots WHERE agent_id = ? ORDER BY id DESC LIMIT ?)').run(aid, aid, keep),
+};
+
+/** 담당자가 바쁠 때 받아 둔 지시. 앞선 작업이 끝나면 순서대로 시작한다. */
+export const Queue = {
+  forAgent: (aid) => db.prepare('SELECT * FROM prompt_queue WHERE agent_id = ? ORDER BY id').all(aid),
+  get: (id) => db.prepare('SELECT * FROM prompt_queue WHERE id = ?').get(id),
+  add: (aid, text, extra) => {
+    const r = db.prepare('INSERT INTO prompt_queue (agent_id, text, extra_json, created_at) VALUES (?, ?, ?, ?)')
+      .run(aid, text, extra ? JSON.stringify(extra) : null, now());
+    return Queue.get(Number(r.lastInsertRowid));
+  },
+  shift: (aid) => {
+    const row = db.prepare('SELECT * FROM prompt_queue WHERE agent_id = ? ORDER BY id LIMIT 1').get(aid);
+    if (row) db.prepare('DELETE FROM prompt_queue WHERE id = ?').run(row.id);
+    return row || null;
+  },
+  remove: (id) => db.prepare('DELETE FROM prompt_queue WHERE id = ?').run(id),
+  clear: (aid) => db.prepare('DELETE FROM prompt_queue WHERE agent_id = ?').run(aid),
 };
 
 export const SavedPrompts = {

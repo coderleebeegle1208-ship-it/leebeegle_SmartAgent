@@ -12,11 +12,11 @@ import { AgentSessions, Workspaces, Agents, Messages, Approvals, PushSubs, Saved
 import { bus, emit } from './bus.js';
 import { initPush, sendPush } from './push.js';
 import { gitSummary, gitCommitDiff, gitRemote, setGitRemote, restoreTree } from './git.js';
-import { requestApproval, waitForApproval, resolveApproval, setBlanketAllow, blanketAllow } from './approvals.js';
+import { requestApproval, waitForApproval, resolveApproval, setBlanketAllow, blanketAllow, configureUnattended } from './approvals.js';
 import { DAY_LABEL, describeDays, digestSettings, isValidTime, nextDue, normalizeDays, runSchedule, sendDigestPush, startScheduler } from './scheduler.js';
 import { buildDigest } from './digest.js';
 import { backupStatus, runBackup } from './backup.js';
-import { startPrompt, stopAgent, isRunning, runningIds, executePlan, switchProvider, compactAgent } from './runners/index.js';
+import { startPrompt, stopAgent, isRunning, runningIds, executePlan, switchProvider, compactAgent, enqueuePrompt, queuedPrompts, removeQueued } from './runners/index.js';
 import { findClaudeBin } from './runners/claude.js';
 import { findCodexEntry } from './runners/codex.js';
 import { getUsage } from './usage.js';
@@ -27,6 +27,7 @@ import { copySkill, deleteSkill, listImportableSkills, listSkills, parseFrontmat
 
 const cfg = loadConfig();
 initPush(cfg);
+configureUnattended(cfg);
 startScheduler(cfg);
 
 // A restart means no agent process survived: clear stale "working"/"needs_attention" states.
@@ -88,6 +89,7 @@ function agentView(a) {
     compact_limit: cfg.compactAfterTokens || 0,
     blanket_allow: !!blanketAllow(a.id),
     schedules: Schedules.forAgent(a.id).length,
+    queued: queuedPrompts(a.id).length,
   };
 }
 
@@ -244,6 +246,7 @@ api.get('/agents/:id', (req, res) => {
     workspace: Workspaces.get(a.workspace_id),
     messages: Messages.forAgent(a.id, Number(req.query.limit) || 300),
     approvals: Approvals.pendingForAgent(a.id),
+    queue: queuedPrompts(a.id),
     usage_summary: Messages.usageSummary(a.id),
   });
 });
@@ -311,11 +314,38 @@ api.post('/agents/:id/prompt', (req, res) => {
     attachments.push(upload);
   }
   try {
+    const current = Agents.get(id);
+    if (!current) return res.status(404).json({ error: 'not found' });
+    // 바쁘면 줄을 세운다. 계획 확인 대기 중일 때는 대표 결정이 먼저라 그대로 400.
+    if ((isRunning(id) || current.status === 'working') && !current.pending_plan) {
+      const { count } = enqueuePrompt(id, text, { attachments, links });
+      return res.json({ ...agentView(Agents.get(id)), queued_now: count });
+    }
     const a = startPrompt(id, text, cfg, { attachments, links });
     res.json(agentView(a));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
+});
+api.get('/agents/:id/queue', (req, res) => res.json(queuedPrompts(Number(req.params.id))));
+api.delete('/agents/:id/queue/:qid', (req, res) => {
+  const ok = removeQueued(Number(req.params.id), Number(req.params.qid));
+  if (!ok) return res.status(404).json({ error: 'not found' });
+  res.json({ ok: true });
+});
+// 결과물 내려받기: 작업 폴더 안의 파일만, 경로 탈출 금지.
+api.get('/agents/:id/file', (req, res) => {
+  const a = Agents.get(Number(req.params.id));
+  const w = a && Workspaces.get(a.workspace_id);
+  if (!w) return res.status(404).json({ error: 'not found' });
+  const rel = String(req.query.path || '');
+  const abs = path.resolve(w.path, rel);
+  const root = path.resolve(w.path);
+  if (!rel || !(abs === root || abs.startsWith(root + path.sep))) return res.status(400).json({ error: 'bad path' });
+  if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return res.status(404).json({ error: 'file not found' });
+  res.setHeader('Cache-Control', 'no-store');
+  if (req.query.download) res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(abs))}`);
+  res.sendFile(abs);
 });
 api.post('/agents/:id/compact', async (req, res) => {
   try {

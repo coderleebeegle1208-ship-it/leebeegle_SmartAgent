@@ -14,6 +14,10 @@ const { AgentSessions, Agents, Messages, Workspaces } = await import('../server/
 const { buildClaudeArgs, claudeStdinText, guardSettings } = await import('../server/runners/claude.js');
 const { outsideRisk } = await import('../server/guard.js');
 const { createRunWatch, watchLimits, describeVerdict } = await import('../server/watchdog.js');
+const { enqueuePrompt, queuedPrompts, removeQueued, isTransientError, deliverableFiles } = await import('../server/runners/index.js');
+const { isSafeWhenUnattended, configureUnattended } = await import('../server/approvals.js');
+const { explainError, errorMessageText } = await import('../server/errors.js');
+const { Queue } = await import('../server/db.js');
 const { CODEX_EFFICIENCY_CONFIG, buildCodexArgs, codexApproverConfig, codexApproverEnv, codexStyledText } = await import('../server/runners/codex.js');
 const { clipForTriage, claudeAddDirs, failoverContinuation, isUsageLimitError, stageEfforts, switchProvider } = await import('../server/runners/index.js');
 const { buildReviewPrompt, buildRevisionPrompt, compactConversation, formatGitManifest, otherProvider } = await import('../server/collaboration.js');
@@ -555,6 +559,7 @@ test('compactAfterTokens migration: v2-capped installs rise to 150k, 0 (off) and
   assert.equal(fresh.tokenOptimizationVersion, 3);
   assert.equal(fresh.planBudgetUsd, 0);
   assert.deepEqual([fresh.runAlertUsd, fresh.runStopUsd, fresh.loopRepeatLimit], [10, 30, 8]);
+  assert.deepEqual([fresh.approvalRemindMin, fresh.approvalAutoMin], [10, 20]);
 
   fs.rmSync(configPath, { force: true });
 });
@@ -973,6 +978,81 @@ test('run watchdog: the same tool call repeated too often stops the run, varied 
   for (let i = 0; i < 20; i++) assert.equal(off.feed(call('x')), null, '0 = off');
   assert.deepEqual(watchLimits({ runAlertUsd: 0, runStopUsd: 50 }), { alertUsd: 0, stopUsd: 50, loopRepeat: 8 });
   assert.deepEqual(watchLimits({}), { alertUsd: 10, stopUsd: 30, loopRepeat: 8 });
+});
+
+test('prompt queue: a busy agent parks prompts in order, they can be removed, and the view counts them', () => {
+  const ws = Workspaces.create('queue-ws', path.join(os.tmpdir(), `queue-ws-${process.pid}`));
+  const agent = Agents.create(ws.id, 'claude', '줄서기봇');
+  const first = enqueuePrompt(agent.id, '첫 번째 지시', { attachments: [], links: [] });
+  const second = enqueuePrompt(agent.id, '두 번째 지시', { links: ['https://x'] });
+  assert.equal(first.count, 1); assert.equal(second.count, 2);
+  assert.deepEqual(queuedPrompts(agent.id).map((q) => q.text), ['첫 번째 지시', '두 번째 지시']);
+  assert.throws(() => enqueuePrompt(agent.id, '   ', {}), /내용이 없습니다/);
+  assert.equal(removeQueued(agent.id, first.row.id), true);
+  assert.equal(removeQueued(agent.id, 999999), false);
+  assert.deepEqual(queuedPrompts(agent.id).map((q) => q.text), ['두 번째 지시']);
+  assert.equal(Queue.shift(agent.id).text, '두 번째 지시');
+  assert.equal(Queue.shift(agent.id), null);
+  Agents.remove(agent.id); Workspaces.remove(ws.id);
+});
+
+test('unattended approvals: only reads and in-folder edits count as safe; questions, outside edits and mutating shell never do', () => {
+  const ws = 'C:/Users/leebe/Desktop/leebeegle_SmartAgent';
+  assert.equal(isSafeWhenUnattended('Read', { file_path: 'C:/Windows/x' }, ws), true);
+  assert.equal(isSafeWhenUnattended('Grep', { pattern: 'x' }, ws), true);
+  assert.equal(isSafeWhenUnattended('Edit', { file_path: 'server/a.js' }, ws), true);
+  assert.equal(isSafeWhenUnattended('Edit', { file_path: 'C:/Users/leebe/Desktop/other/a.js' }, ws), false);
+  assert.equal(isSafeWhenUnattended('AskUserQuestion', { questions: [] }, ws), false);
+  assert.equal(isSafeWhenUnattended('Bash', { command: 'git status && git diff' }, ws), true);
+  assert.equal(isSafeWhenUnattended('Bash', { command: 'npm test' }, ws), true);
+  assert.equal(isSafeWhenUnattended('Bash', { command: 'cat a.txt | grep x' }, ws), true);
+  assert.equal(isSafeWhenUnattended('Bash', { command: 'rm -rf dist' }, ws), false);
+  assert.equal(isSafeWhenUnattended('Bash', { command: 'git status; rm x' }, ws), false);
+  assert.equal(isSafeWhenUnattended('Bash', { command: 'cat a > b' }, ws), false);
+  assert.equal(isSafeWhenUnattended('Bash', { command: 'git push' }, ws), false);
+  const lim = configureUnattended({ approvalRemindMin: 0, approvalAutoMin: 5 });
+  assert.deepEqual(lim, { remindMin: 0, autoMin: 5 });
+  assert.deepEqual(configureUnattended({}), { remindMin: 10, autoMin: 20 });
+});
+
+test('errors: plain-Korean explanations and the transient (retry-worthy) flag', () => {
+  assert.equal(explainError('Error: fetch failed ECONNRESET').transient, true);
+  assert.match(explainError('fetch failed').plain, /인터넷/);
+  assert.equal(explainError('API Error: 529 overloaded').transient, true);
+  assert.equal(explainError('You have hit your usage limit').transient, false);
+  assert.match(explainError('rate limit exceeded').plain, /몰려/);
+  assert.equal(explainError('종료 코드 1').transient, true);
+  assert.equal(explainError('unauthorized 401').transient, false);
+  assert.equal(explainError('something odd').transient, false);
+  assert.equal(isTransientError({ ok: false, text: 'socket hang up' }), true);
+  assert.equal(isTransientError({ ok: false, subtype: 'error_max_turns', text: 'exit 1' }), false);
+  assert.equal(isTransientError({ ok: true }), false);
+  assert.equal(errorMessageText('이미 작업 중입니다'), '이미 작업 중입니다', 'a short Korean line stays as is');
+  assert.match(errorMessageText('Error: connect ETIMEDOUT 1.2.3.4:443'), /^인터넷 연결이 잠깐 끊겼습니다\n원문: Error: connect ETIMEDOUT/);
+});
+
+test('deliverables: media/docs among changed files are listed with size, code files are not', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'deliver-'));
+  fs.mkdirSync(path.join(dir, 'out'));
+  fs.writeFileSync(path.join(dir, 'out', 'final.mp4'), Buffer.alloc(1500));
+  fs.writeFileSync(path.join(dir, 'report.pdf'), 'pdf');
+  fs.writeFileSync(path.join(dir, 'server.js'), 'js');
+  const list = deliverableFiles(dir, ['out/final.mp4', 'report.pdf', 'server.js', 'missing.png']);
+  assert.deepEqual(list.map((f) => [f.path, f.name, f.size]), [['out/final.mp4', 'final.mp4', 1500], ['report.pdf', 'report.pdf', 3]]);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('phone UI wires the queue, deliverables, read-aloud and unattended copy', () => {
+  const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const js = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(js, /case 'queue\.changed'/);
+  assert.match(js, /줄 세우기/);
+  assert.match(js, /queued_now/);
+  assert.match(js, /deliver-btn/);
+  assert.match(js, /navigator\.share/);
+  assert.match(js, /SpeechSynthesisUtterance/);
+  assert.match(html, /id="tts-enabled"/);
+  assert.match(html, /자리 비웠을 때/);
 });
 
 test('turn snapshots capture tracked + untracked files and undo restores the exact previous tree', async () => {

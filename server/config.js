@@ -52,6 +52,11 @@ export function loadConfig() {
     cfg.tokenOptimizationVersion = 3;
     changed = true;
   }
+  if (cfg.approvalRemindMin === undefined) {
+    cfg.approvalRemindMin = 10; // 승인 요청에 답이 없으면 이 시간 뒤 한 번 더 알림 (0 = 끔)
+    cfg.approvalAutoMin = 20;   // 그래도 없으면 안전한 요청(읽기·작업 폴더 안 편집)만 자동 허용 (0 = 끔)
+    changed = true;
+  }
   if (cfg.runAlertUsd === undefined) {
     cfg.runAlertUsd = 10;      // 한 작업이 이 금액을 넘으면 알림만 (0 = 끔)
     cfg.runStopUsd = 30;       // 이 금액을 넘으면 멈추고 폰에 묻기 (0 = 끔)
