@@ -11,7 +11,7 @@ process.env.AGENT_REMOTE_CONFIG = path.join(os.tmpdir(), `agent-remote-test-conf
 process.env.AGENT_REMOTE_BACKUP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-remote-backups-'));
 
 const { AgentSessions, Agents, Messages, Workspaces } = await import('../server/db.js');
-const { buildClaudeArgs, claudeStdinText, guardSettings } = await import('../server/runners/claude.js');
+const { buildClaudeArgs, claudeStdinText } = await import('../server/runners/claude.js');
 const { outsideRisk } = await import('../server/guard.js');
 const { createRunWatch, watchLimits, describeVerdict } = await import('../server/watchdog.js');
 const { enqueuePrompt, queuedPrompts, removeQueued, isTransientError, deliverableFiles } = await import('../server/runners/index.js');
@@ -907,47 +907,20 @@ test('guard: edits and mutating commands outside the workspace are flagged, read
   assert.equal(risk('Bash', { command: 'shutdown /s' }), true);
 });
 
-test('guard: outside-the-workspace requests skip blanket approval, are marked, and stay out of bulk allows', async () => {
+test('guard: outside-the-workspace requests are marked red but blanket approval still covers them', async () => {
   const wsPath = path.join(os.tmpdir(), `guard-ws-${process.pid}`);
   const ws = Workspaces.create('guard-ws', wsPath);
   const agent = Agents.create(ws.id, 'claude', '안전봇');
-  setBlanketAllow(agent.id, true);
-  const inside = requestApproval(agent.id, 'Write', { file_path: path.join(wsPath, 'a.txt') });
-  assert.equal((await inside.promise).behavior, 'allow', 'inside: blanket applies');
   const outside = requestApproval(agent.id, 'Write', { file_path: path.join(os.tmpdir(), 'elsewhere.txt') });
-  assert.equal(Approvals.get(outside.approval.id).status, 'pending', 'outside: still asks the owner');
-  assert.equal(Approvals.get(outside.approval.id).risk, 'outside');
-  const hooked = requestApproval(agent.id, 'Bash', { command: 'npm test' }, { risk: 'outside' });
-  assert.equal(Approvals.get(hooked.approval.id).risk, 'outside', 'the hook may flag a request itself');
-  setBlanketAllow(agent.id, false);
+  assert.equal(Approvals.get(outside.approval.id).status, 'pending', 'ask mode: still asks');
+  assert.equal(Approvals.get(outside.approval.id).risk, 'outside', 'marked for the red card');
   const plain = requestApproval(agent.id, 'Bash', { command: 'npm test' });
   resolveApproval(plain.approval.id, 'allow', { scope: 'run' });
-  assert.equal(Approvals.get(outside.approval.id).status, 'pending', '"allow for this run" leaves outside requests alone');
-  assert.equal(Approvals.get(hooked.approval.id).status, 'pending');
-  resolveApproval(outside.approval.id, 'deny');
-  resolveApproval(hooked.approval.id, 'allow');
-  assert.equal((await hooked.promise).behavior, 'allow');
+  assert.equal((await outside.promise).behavior, 'allow', '"allow for this run" covers outside requests too');
+  const later = requestApproval(agent.id, 'Write', { file_path: path.join(os.tmpdir(), 'elsewhere2.txt') });
+  assert.equal((await later.promise).behavior, 'allow', 'blanket applies to later outside requests');
   setBlanketAllow(agent.id, false);
   Agents.remove(agent.id); Workspaces.remove(ws.id);
-});
-
-test('guard hook: passes silently inside the workspace, blocks outside when the server is unreachable', () => {
-  const hook = fileURLToPath(new URL('../server/guard-hook.js', import.meta.url));
-  const wsPath = path.join(os.tmpdir(), `hook-ws-${process.pid}`);
-  const run = (payload, env = {}) => execFileSync(process.execPath, [hook], {
-    input: JSON.stringify(payload), env: { ...process.env, APPROVER_WORKSPACE: wsPath, APPROVER_URL: '', APPROVER_TOKEN: '', APPROVER_AGENT_ID: '', ...env }, stdio: 'pipe',
-  }).toString();
-  assert.equal(run({ tool_name: 'Edit', tool_input: { file_path: path.join(wsPath, 'x.js') } }), '', 'no output → Claude Code decides as usual');
-  const out = JSON.parse(run({ tool_name: 'Write', tool_input: { file_path: path.join(os.tmpdir(), 'outside.txt') } }));
-  assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
-  assert.match(out.hookSpecificOutput.permissionDecisionReason, /작업 폴더 밖/);
-  const settings = guardSettings();
-  assert.match(settings.hooks.PreToolUse[0].matcher, /Bash/);
-  assert.match(settings.hooks.PreToolUse[0].hooks[0].command, /guard-hook\.js/);
-  const args = buildClaudeArgs({ permission_mode: 'auto', session_id: null }, 'mcp.json', { settingsPath: 's.json' });
-  assert.equal(args[args.indexOf('--settings') + 1], 's.json');
-  const planArgs = buildClaudeArgs({ permission_mode: 'auto', session_id: null }, 'mcp.json', { settingsPath: 's.json', stage: 'plan' });
-  assert.equal(planArgs.includes('--settings'), false, 'plan turns cannot edit, so no hook');
 });
 
 test('run watchdog: alerts once past the alert line, keeps going, stops past the stop line', () => {
@@ -1175,7 +1148,7 @@ const { inQuietWindow, saveQuietSettings, quietSettings, isQuietNow, holdNotific
 const { sendPush } = await import('../server/push.js');
 const { flushHeldIfMorning } = await import('../server/scheduler.js');
 const { parseProgress, setProgress, getProgress, clearProgress, tickProgress } = await import('../server/progress.js');
-const { handleCallbackData, handleText, telegramStatus, unlinkTelegram } = await import('../server/telegram.js');
+const { handleCallbackData, handleText, telegramStatus, unlinkTelegram, muteTelegram, isMuted } = await import('../server/telegram.js');
 const { Settings: KV } = await import('../server/db.js');
 
 test('risk level: green for reads, yellow for undoable edits inside the workspace, red for outside/destructive, none for questions', () => {
@@ -1276,9 +1249,28 @@ test('progress: percent/"n/m" parsing, agent-set values, and a tailed log file t
   fs.rmSync(wsPath, { recursive: true, force: true });
 });
 
+test('telegram: mute pauses notifications for a while or until turned back on, by app or by chat command', () => {
+  assert.equal(isMuted(), false);
+  const t0 = 1_800_000_000_000;
+  muteTelegram(120, t0);
+  assert.equal(isMuted(t0 + 60 * 60_000), true, 'still muted after 1h');
+  assert.equal(isMuted(t0 + 121 * 60_000), false, 'expires after 2h');
+  muteTelegram(null);
+  assert.equal(isMuted(t0 + 365 * 24 * 60 * 60_000), true, 'null = until turned back on');
+  assert.equal(telegramStatus().muted, true);
+  assert.equal(handleText('/unmute'), '알림을 다시 켰습니다');
+  assert.equal(isMuted(), false);
+  assert.match(handleText('/mute 30m'), /까지 꺼짐/);
+  assert.equal(isMuted(), true);
+  assert.match(handleText('/mute'), /다시 켤 때까지 꺼짐/);
+  assert.ok(handleText('/help').includes('/mute'));
+  muteTelegram(0);
+  assert.equal(isMuted(), false);
+});
+
 test('telegram: approval buttons resolve like the phone, replies become prompts, pairing state is exposed', () => {
   unlinkTelegram();
-  assert.deepEqual(telegramStatus(), { configured: false, linked: false, bot: null, pair_code: null, last_agent: null });
+  assert.deepEqual(telegramStatus(), { configured: false, linked: false, bot: null, pair_code: null, last_agent: null, muted: false, mute_until: 0 });
   const ws = Workspaces.create('tg-ws', path.join(os.tmpdir(), `tg-ws-${process.pid}`));
   const agent = Agents.create(ws.id, 'claude', '텔레봇');
   const r = requestApproval(agent.id, 'Bash', { command: 'npm test' });

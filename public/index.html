@@ -261,6 +261,15 @@
           <span>내 봇에게 이 번호를 보내주세요</span>
           <b id="tg-pair-code" class="mono"></b>
         </div>
+        <div class="tg-mute" id="tg-mute">
+          <div class="kv"><span>알림</span><b id="tg-mute-state">켜짐</b></div>
+          <div class="row-flex" id="tg-mute-opts">
+            <button class="chip" data-mute="60">1시간 끄기</button>
+            <button class="chip" data-mute="180">3시간 끄기</button>
+            <button class="chip" data-mute="">다시 켤 때까지</button>
+          </div>
+          <button class="btn" id="btn-tg-unmute" hidden>알림 다시 켜기</button>
+        </div>
         <div class="row-flex">
           <button class="btn" id="btn-tg-test">테스트</button>
           <div class="spacer"></div>

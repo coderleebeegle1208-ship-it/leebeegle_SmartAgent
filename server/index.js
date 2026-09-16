@@ -26,7 +26,7 @@ import { UPLOAD_DIR, findFfmpeg, loadUpload, saveUpload } from './uploads.js';
 import { copySkill, deleteSkill, listImportableSkills, listSkills, parseFrontmatter, validateSkillName, writeSkill } from './skills.js';
 import { heldNotifications, isQuietNow, quietSettings, saveQuietSettings } from './quiet.js';
 import { clearProgress, getProgress, setProgress } from './progress.js';
-import { configureTelegram, initTelegram, sendTelegram, telegramStatus, unlinkTelegram } from './telegram.js';
+import { configureTelegram, initTelegram, muteTelegram, sendTelegram, telegramStatus, unlinkTelegram } from './telegram.js';
 
 const cfg = loadConfig();
 initPush(cfg);
@@ -636,9 +636,11 @@ api.post('/telegram', async (req, res) => {
   try { res.json(await configureTelegram(req.body?.token)); } catch (e) { res.status(400).json({ error: e.message }); }
 });
 api.delete('/telegram', (req, res) => res.json(unlinkTelegram()));
+// 알림 잠깐 끄기: { minutes: 0 } 다시 켬, { minutes: 120 } 2시간, { minutes: null } 다시 켤 때까지
+api.post('/telegram/mute', (req, res) => res.json(muteTelegram(req.body?.minutes)));
 api.post('/telegram/test', async (req, res) => {
   try {
-    await sendTelegram({ title: 'leebeegle_SmartAgent', body: '텔레그램 연결이 정상입니다. 이제 승인 요청과 완료 보고가 여기로 옵니다.', url: '/' });
+    await sendTelegram({ title: 'leebeegle_SmartAgent', body: '텔레그램 연결이 정상입니다. 이제 승인 요청과 완료 보고가 여기로 옵니다.', url: '/', force: true });
     res.json({ ok: true });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });

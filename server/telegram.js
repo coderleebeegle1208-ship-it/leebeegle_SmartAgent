@@ -18,6 +18,10 @@ let offset = 0;
 
 const token = () => Settings.get('tg_token') || '';
 const chatId = () => Settings.get('tg_chat_id') || '';
+// 알림 잠깐 끄기: 0/없음 = 켜짐, 양수 = 그 시각(ms)까지 끔, -1 = 다시 켤 때까지 끔
+const FOREVER = -1;
+const muteUntil = () => Number(Settings.get('tg_mute_until')) || 0;
+export const isMuted = (now = Date.now()) => { const m = muteUntil(); return m === FOREVER || m > now; };
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 async function call(method, body, tok = token()) {
@@ -40,7 +44,25 @@ export function telegramStatus() {
     bot: Settings.get('tg_bot_name') || null,
     pair_code: chatId() ? null : Settings.get('tg_pair_code') || null,
     last_agent: Number(Settings.get('tg_last_agent')) || null,
+    muted: isMuted(),
+    mute_until: isMuted() ? muteUntil() : 0,
   };
+}
+
+/** minutes: 0 → 다시 켜기, 양수 → 그만큼 끄기, null/undefined → 다시 켤 때까지 끄기 */
+export function muteTelegram(minutes, now = Date.now()) {
+  const m = minutes == null ? FOREVER : Math.max(0, Number(minutes) || 0);
+  Settings.set('tg_mute_until', m === 0 ? null : m === FOREVER ? String(FOREVER) : String(now + m * 60_000));
+  return telegramStatus();
+}
+export function muteLabel(now = Date.now()) {
+  if (!isMuted(now)) return '켜짐';
+  const m = muteUntil();
+  if (m === FOREVER) return '다시 켤 때까지 꺼짐';
+  const d = new Date(m);
+  const sameDay = d.toDateString() === new Date(now).toDateString();
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return `${sameDay ? '오늘' : '내일'} ${hm}까지 꺼짐`;
 }
 
 /** 토큰을 저장하고 봇 이름을 확인한다. 아직 연결된 대화가 없으면 6자리 연결 번호를 만든다. */
@@ -57,7 +79,7 @@ export async function configureTelegram(botToken) {
 }
 export function unlinkTelegram() {
   generation += 1;
-  for (const k of ['tg_token', 'tg_chat_id', 'tg_pair_code', 'tg_bot_name', 'tg_last_agent']) Settings.set(k, null);
+  for (const k of ['tg_token', 'tg_chat_id', 'tg_pair_code', 'tg_bot_name', 'tg_last_agent', 'tg_mute_until']) Settings.set(k, null);
   return telegramStatus();
 }
 
@@ -65,6 +87,7 @@ export function unlinkTelegram() {
 export async function sendTelegram(payload) {
   const chat = chatId();
   if (!chat) return;
+  if (isMuted() && !payload.force) return; // 잠깐 끈 동안은 조용히 (설정 화면의 테스트만 예외)
   const agentId = Number((String(payload.url || '').match(/agent=(\d+)/) || [])[1]);
   if (agentId) Settings.set('tg_last_agent', String(agentId));
   const body = payload.long || payload.body || '';
@@ -73,7 +96,7 @@ export async function sendTelegram(payload) {
   let reply_markup;
   if (ap?.id && !ap.question) {
     const rows = [[{ text: '✅ 허용', callback_data: `ap:${ap.id}:allow` }, { text: '⛔ 거부', callback_data: `ap:${ap.id}:deny` }]];
-    if (!ap.risk) rows.push([{ text: '이번 작업 동안 모두 허용', callback_data: `ap:${ap.id}:run` }]);
+    rows.push([{ text: '이번 작업 동안 모두 허용', callback_data: `ap:${ap.id}:run` }]);
     reply_markup = { inline_keyboard: rows };
   } else if (ap?.question) {
     reply_markup = { inline_keyboard: [[{ text: '앱에서 답하기', url: appUrl(agentId) }]] };
@@ -112,7 +135,7 @@ export function handleText(text, { cfg = cfgRef } = {}) {
   if (!t) return '내용이 없습니다';
   const agents = Agents.all();
   if (/^\/(start|help|도움말)/.test(t)) {
-    return ['leebeegle_SmartAgent 연결됨.', '- 그냥 글을 보내면 마지막으로 보고한 담당자에게 지시로 전달됩니다', '- /list 담당자 목록 (앞의 [ ]가 프로젝트)', '- /use 번호 : 지시 받을 담당자(프로젝트) 바꾸기', '- /who 지금 누구에게 가는지 확인', '- 승인 요청은 버튼으로 바로 답할 수 있습니다'].join('\n');
+    return ['leebeegle_SmartAgent 연결됨.', '- 그냥 글을 보내면 마지막으로 보고한 담당자에게 지시로 전달됩니다', '- /list 담당자 목록 (앞의 [ ]가 프로젝트)', '- /use 번호 : 지시 받을 담당자(프로젝트) 바꾸기', '- /who 지금 누구에게 가는지 확인', '- /mute 2h 또는 /mute 30m : 그동안 알림 끄기 (/mute 만 보내면 다시 켤 때까지)', '- /unmute 알림 다시 켜기', '- 승인 요청은 버튼으로 바로 답할 수 있습니다'].join('\n');
   }
   const cur = () => Agents.get(Number(Settings.get('tg_last_agent')));
   if (/^\/(list|목록)/.test(t)) {
@@ -123,6 +146,13 @@ export function handleText(text, { cfg = cfgRef } = {}) {
   if (/^\/(who|누구)/.test(t)) {
     const c = cur();
     return c ? `지금 지시는 ${who(c)} 에게 갑니다` : '아직 정해지지 않았습니다. /list 로 보고 /use 번호';
+  }
+  if (/^\/(unmute|켜)/.test(t)) { muteTelegram(0); return '알림을 다시 켰습니다'; }
+  const mute = /^\/(mute|꺼)(?:\s+(\d+)\s*(m|h|분|시간)?)?/.exec(t);
+  if (mute) {
+    const n = mute[2] ? Number(mute[2]) * (/^(h|시간)$/.test(mute[3] || 'm') ? 60 : 1) : null;
+    muteTelegram(n);
+    return `알림 ${muteLabel()}. 그동안 승인 요청과 보고는 앱에서만 볼 수 있습니다. (/unmute 로 다시 켜기)`;
   }
   const use = /^\/use\s+#?(\d+)/.exec(t);
   if (use) {

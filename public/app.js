@@ -1490,7 +1490,7 @@
         card.innerHTML = head.replace('승인 필요 ·', `${pill}승인 필요 ·`) + `<h2>${esc(ap.tool_name)} 실행 승인</h2>${warn}${body}
           <input class="reason" placeholder="거부 사유 (선택)">
           <div class="btns"><button class="btn ghost" data-deny>거부</button><button class="btn primary" data-allow>${risky ? '그래도 허용' : '허용'}</button></div>
-          ${risky ? '' : '<button type="button" class="btn allow-all" data-allow-run>이번 작업 동안 모두 허용<small>끝날 때까지 남은 요청을 묻지 않습니다</small></button>'}`;
+          <button type="button" class="btn allow-all" data-allow-run>이번 작업 동안 모두 허용<small>끝날 때까지 남은 요청을 묻지 않습니다</small></button>`;
         card.querySelector('[data-allow]').onclick = () => decide(ap.id, 'allow');
         const allowRun = card.querySelector('[data-allow-run]');
         if (allowRun) allowRun.onclick = () => decide(ap.id, 'allow', { scope: 'run' });
@@ -2263,7 +2263,23 @@
     $('#tg-pair').hidden = t.linked;
     $('#tg-pair-code').textContent = t.pair_code || '';
     $('#tg-state').textContent = t.linked ? '연결됨 · 승인 요청과 완료 보고가 텔레그램으로도 갑니다. 답장을 보내면 지시로 전달됩니다.' : '아직 연결 전입니다. 아래 번호를 봇에게 보내주세요.';
+    $('#tg-mute').hidden = !t.linked;
+    const st = $('#tg-mute-state');
+    st.textContent = t.muted ? (t.mute_until > 0 ? `${fmtTime(t.mute_until)}까지 꺼짐` : '다시 켤 때까지 꺼짐') : '켜짐';
+    st.classList.toggle('off', !!t.muted);
+    $('#tg-mute-opts').hidden = !!t.muted;
+    $('#btn-tg-unmute').hidden = !t.muted;
   }
+  function fmtTime(ms) {
+    const d = new Date(ms); const same = d.toDateString() === new Date().toDateString();
+    return `${same ? '오늘' : '내일'} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+  async function setMute(minutes) {
+    try { renderTelegram(await api('/telegram/mute', { method: 'POST', body: { minutes } })); toast(minutes === 0 ? '텔레그램 알림을 다시 켰습니다' : '텔레그램 알림을 잠깐 껐습니다'); }
+    catch (e) { toast(e.message, 3500); }
+  }
+  $('#tg-mute-opts').onclick = (e) => { const b = e.target.closest('[data-mute]'); if (b) setMute(b.dataset.mute === '' ? null : Number(b.dataset.mute)); };
+  $('#btn-tg-unmute').onclick = () => setMute(0);
   async function loadTelegram() { try { renderTelegram(await api('/telegram')); } catch {} }
   $('#btn-tg-connect').onclick = async () => {
     const tok = $('#tg-token').value.trim();

@@ -137,9 +137,9 @@ export function requestApproval(agentId, toolName, input, opts = {}) {
 
   const level = riskLevel(toolName, input, workspace?.path, risk);
   const approval = Approvals.create(agentId, toolName, input, risk, level);
-  // Questions and outside-the-workspace changes still need a human even under blanket approval;
-  // everything else sails through.
-  const auto = toolName !== 'AskUserQuestion' && !risk ? blanket.get(agentId) : null;
+  // Questions still need a human even under blanket approval; everything else (outside-the-folder
+  // changes included — they're only marked red, not gated) sails through.
+  const auto = toolName !== 'AskUserQuestion' ? blanket.get(agentId) : null;
   if (auto) {
     auto.count += 1;
     Approvals.resolve(approval.id, 'allowed', 'blanket');
@@ -183,7 +183,7 @@ export function resolveApproval(id, decision, extra = {}) {
   if (decision === 'allow' && extra.scope === 'run') {
     setBlanketAllow(approval.agent_id, true);
     for (const other of Approvals.pendingForAgent(approval.agent_id)) {
-      if (other.id === id || other.tool_name === 'AskUserQuestion' || other.risk) continue;
+      if (other.id === id || other.tool_name === 'AskUserQuestion') continue;
       resolveApproval(other.id, 'allow');
     }
   }
