@@ -24,6 +24,9 @@
   --warn-bg: #FBF0D0;
   --danger: #B42318;
   --danger-bg: #FDECEA;
+  /* 답한 쪽 색: 클로드는 주황(Claude 브랜드), 코덱스는 초록(OpenAI 브랜드) */
+  --claude: #D97757; --claude-ink: #A8542F; --claude-bg: #FBEFE9;
+  --codex: #10A37F; --codex-ink: #0B7A5F; --codex-bg: #E6F5F0;
   --sans: "Inter", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
   --mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   --r-s: 6px; --r-m: 8px; --r-l: 12px;
@@ -210,13 +213,25 @@ h3 { font-size: 12px; font-weight: 600; color: var(--ink-3); letter-spacing: .02
 .stream { padding: 10px 16px 0; display: flex; flex-direction: column; gap: 10px; }
 .day { font-size: 11px; color: var(--ink-3); text-align: center; font-family: var(--mono); letter-spacing: .04em; margin: 4px 0; }
 .msg { font-size: 14px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
-.msg.user { align-self: flex-end; max-width: 82%; background: var(--surface-2); border-radius: 14px 14px 4px 14px; padding: 9px 12px; }
-.msg.assistant { color: var(--ink); padding-right: 12px; text-wrap: pretty; }
-.msg.assistant code, .msg.plan code { font-family: var(--mono); font-size: 12px; padding: 1px 5px; border-radius: 4px; background: var(--danger-bg); color: var(--danger); }
-.msg.assistant b.hot, .msg.plan b.hot { color: var(--danger); font-weight: 600; }
-.msg.assistant .code, .msg.plan .code { margin: 6px 0; padding: 8px 10px; border-radius: var(--r-s); background: var(--surface); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-all; overflow: auto; max-height: 220px; }
-.msg.assistant b.h, .msg.plan b.h { display: block; margin-top: 4px; }
-.msg-source { display: block; margin-bottom: 4px; color: var(--ink-4); font-family: var(--mono); font-size: 10px; font-weight: 600; letter-spacing: .07em; }
+/* 내가 보낸 말: iMessage처럼 한 가지 색으로 꽉 채운 말풍선 */
+.msg.user { align-self: flex-end; max-width: 82%; background: var(--accent); color: #fff; border-radius: 18px 18px 5px 18px; padding: 10px 14px; box-shadow: 0 1px 2px rgba(94,106,210,.25); }
+.msg.user .time { color: rgba(255,255,255,.72); }
+.msg.user .msg-skill { background: rgba(255,255,255,.18); color: #fff; }
+/* 담당자의 답: 왼쪽에 누가 답했는지 색 띠 + 이름표. 클로드/코덱스가 한눈에 갈린다 */
+.msg.assistant { --who: var(--ink-4); --who-ink: var(--ink-2); --who-bg: var(--surface-2); position: relative; color: var(--ink); text-wrap: pretty; max-width: 94%; padding: 12px 14px 10px 16px; border-radius: 5px 18px 18px 18px; background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--who); }
+.msg.assistant[data-provider="claude"] { --who: var(--claude); --who-ink: var(--claude-ink); --who-bg: var(--claude-bg); }
+.msg.assistant[data-provider="codex"] { --who: var(--codex); --who-ink: var(--codex-ink); --who-bg: var(--codex-bg); }
+.msg.assistant.is_error { --who: var(--danger); --who-ink: var(--danger); --who-bg: var(--danger-bg); }
+.msg.assistant code, .msg.plan code { font-family: var(--mono); font-size: 12px; padding: 1px 6px; border-radius: 5px; background: var(--who-bg, var(--accent-bg)); color: var(--who-ink, var(--accent-ink)); }
+.msg.assistant b.hot, .msg.plan b.hot { color: var(--danger); font-weight: 700; background: var(--danger-bg); padding: 0 4px; border-radius: 4px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.msg.assistant .code, .msg.plan .code { margin: 8px 0; padding: 10px 12px; border-radius: var(--r-m); background: #1E1F22; color: #E8E9EC; font-family: var(--mono); font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; overflow: auto; max-height: 220px; }
+.msg.assistant b.h, .msg.plan b.h { display: block; margin: 6px 0 2px; font-size: 15px; font-weight: 700; color: var(--who-ink, var(--accent-ink)); }
+/* "- " 로 시작하는 줄은 색 점 달린 항목으로 */
+.msg.assistant .li, .msg.plan .li { display: inline-block; width: 100%; position: relative; padding-left: 14px; vertical-align: top; }
+.msg.assistant .li::before, .msg.plan .li::before { content: ""; position: absolute; left: 1px; top: .66em; width: 6px; height: 6px; border-radius: 50%; background: var(--who, var(--accent)); }
+.msg-source { display: flex; width: fit-content; align-items: center; gap: 6px; margin: 0 0 8px; padding: 3px 9px 3px 5px; border-radius: 999px; background: var(--who-bg); color: var(--who-ink); font-family: var(--mono); font-size: 10px; font-weight: 700; letter-spacing: .07em; line-height: 1; }
+.msg-source::before { content: ""; width: 14px; height: 14px; border-radius: 50%; background: var(--who); box-shadow: inset 0 0 0 3px var(--who-bg); }
+.msg.assistant .time { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
 .activity { border: 1px solid var(--line); border-radius: var(--r-m); background: var(--surface); }
 .activity summary { list-style: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 34px; padding: 6px 10px 6px 12px; cursor: pointer; font-size: 12px; color: var(--ink-3); user-select: none; }
 .activity summary::-webkit-details-marker { display: none; }
@@ -246,8 +261,9 @@ h3 { font-size: 12px; font-weight: 600; color: var(--ink-3); letter-spacing: .02
 .msg.system.ok { color: var(--ink-3); }
 .msg.system.ok::before { background: var(--ink-4); }
 .msg.error { color: var(--danger); background: var(--danger-bg); border-radius: var(--r-m); padding: 9px 12px; }
-.msg.plan { background: var(--accent-bg); border: 1px solid #C9CEF2; border-radius: var(--r-l); padding: 12px 14px; font-size: 14px; }
-.msg.plan .plan-h { font-size: 11px; font-weight: 600; letter-spacing: .06em; color: var(--accent-ink); font-family: var(--mono); margin-bottom: 6px; }
+.msg.plan { --who: var(--accent); --who-ink: var(--accent-ink); --who-bg: #DFE3F7; background: var(--accent-bg); border: 1px solid #C9CEF2; border-left: 3px solid var(--accent); border-radius: 5px 18px 18px 18px; padding: 12px 14px 12px 16px; font-size: 14px; }
+.msg.plan .plan-h { display: flex; width: fit-content; align-items: center; gap: 6px; font-size: 10px; font-weight: 700; letter-spacing: .07em; color: var(--accent-ink); font-family: var(--mono); margin-bottom: 8px; padding: 3px 9px 3px 5px; border-radius: 999px; background: #DFE3F7; line-height: 1; }
+.msg.plan .plan-h::before { content: ""; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); box-shadow: inset 0 0 0 3px #DFE3F7; }
 .hint { margin: -2px 0 0; color: var(--ink-3); font-size: 11px; line-height: 1.45; }
 .repo-card { padding: 12px 14px 14px; border: 1px solid var(--line); border-radius: var(--r-l); background: var(--surface); }
 .repo-card-name { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; color: var(--ink); }
@@ -283,7 +299,7 @@ body.lightbox-open { overflow: hidden; }
 .planbar .btn { height: 38px; font-size: 14px; }
 .form label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--ink-2); font-size: 14px; font-weight: 400; min-height: 44px; }
 .form label.check input { width: 20px; height: 20px; accent-color: var(--accent); }
-.msg .time { display: block; color: var(--ink-4); font-size: 11px; margin-top: 4px; font-family: var(--mono); }
+.msg .time { display: block; color: var(--ink-4); font-size: 11px; margin-top: 6px; font-family: var(--mono); }
 
 .composer { position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; border-top: 1px solid var(--line); background: var(--bg); padding: 10px 12px calc(12px + env(safe-area-inset-bottom)); }
 .composer-controls { max-width: 760px; min-height: 32px; margin: 0 auto 7px; display: flex; align-items: center; gap: 8px; color: var(--ink-3); }

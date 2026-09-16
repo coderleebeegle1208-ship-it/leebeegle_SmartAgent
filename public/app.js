@@ -16,7 +16,8 @@
       return esc(part)
         .replace(/^#{1,6}\s+(.+)$/gm, '<b class="h">$1</b>')
         .replace(/\*\*([^*\n]+)\*\*/g, '<b class="hot">$1</b>')
-        .replace(/`([^`\n]+)`/g, '<code>$1</code>');
+        .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+        .replace(/^[-•]\s+(.+)$/gm, '<span class="li">$1</span>');
     }).join('');
   };
   // Token-usage card formatting (mirrors server/tokens.js so both sides agree on shape).
@@ -1352,6 +1353,7 @@
       el.textContent = shortPath(m.content);
     } else {
       el.className = `msg ${m.role}${meta.is_error ? ' is_error' : ''}`;
+      if (m.role === 'assistant' && meta.provider) el.dataset.provider = meta.provider;
       const source = m.role === 'assistant' && meta.provider
         ? `<span class="msg-source">${esc(kindLabel[meta.provider] || meta.provider)}${meta.phase ? ` · ${esc(phaseLabel[meta.phase] || meta.phase)}` : ''}</span>`
         : '';
