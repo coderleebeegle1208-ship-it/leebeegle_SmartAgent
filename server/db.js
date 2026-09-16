@@ -61,12 +61,37 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (agent_id, kind)
 );
+CREATE TABLE IF NOT EXISTS schedules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  text TEXT NOT NULL,
+  time TEXT NOT NULL,                -- 'HH:MM' local time
+  days TEXT NOT NULL DEFAULT '',     -- '' = every day, else comma-separated 0(일)..6(토)
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_run_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS turn_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  before_tree TEXT NOT NULL,
+  after_tree TEXT,
+  files INTEGER NOT NULL DEFAULT 0,
+  undone_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
 `);
 
 // Lightweight migrations for columns added after the first release.
 for (const [table, col, def] of [
   ['agents', 'model', 'TEXT'],
   ['agents', 'effort', 'TEXT'],
+  ['agents', 'codex_model', 'TEXT'],
+  ['agents', 'codex_effort', 'TEXT'],
   ['workspaces', 'pinned', 'INTEGER NOT NULL DEFAULT 0'],
   ['agents', 'pipeline', "TEXT NOT NULL DEFAULT 'auto'"],      // auto | manual
   ['agents', 'triage_model', "TEXT NOT NULL DEFAULT 'haiku'"],
@@ -128,6 +153,14 @@ export const Agents = {
 export const Messages = {
   forAgent: (aid, limit = 200) =>
     db.prepare('SELECT * FROM (SELECT * FROM messages WHERE agent_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id').all(aid, limit),
+  /** Like forAgent, but only counts messages whose role is in `roles` — so "last N" means N turns
+   * of actual conversation, not N rows once tool/system chatter (most of the table) is mixed in. */
+  recentByRole: (aid, roles, limit = 30) => {
+    const placeholders = roles.map(() => '?').join(',');
+    return db.prepare(
+      `SELECT * FROM (SELECT * FROM messages WHERE agent_id = ? AND role IN (${placeholders}) ORDER BY id DESC LIMIT ?) ORDER BY id`
+    ).all(aid, ...roles, limit);
+  },
   add: (agent_id, role, content, meta) => {
     const r = db.prepare('INSERT INTO messages (agent_id, role, content, meta, created_at) VALUES (?, ?, ?, ?, ?)')
       .run(agent_id, role, content, meta ? JSON.stringify(meta) : null, now());
@@ -137,9 +170,16 @@ export const Messages = {
   latestId: (aid) => Number(db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM messages WHERE agent_id = ?').get(aid)?.id || 0),
   after: (aid, id) => db.prepare('SELECT * FROM messages WHERE agent_id = ? AND id > ? ORDER BY id').all(aid, id),
   usageSummary: (aid) => {
+    // "fresh" matches the per-run headline's "새 토큰"+"캐시 저장" combined (input+output+cacheWrite).
+    // Older rows predate the `total.fresh` field, so fall back to deriving it from their parts.
     const row = (sinceMs) => db.prepare(`
       SELECT COUNT(*) AS runs,
              COALESCE(SUM(json_extract(meta, '$.total.tokens')), 0) AS tokens,
+             COALESCE(SUM(COALESCE(
+               json_extract(meta, '$.total.fresh'),
+               json_extract(meta, '$.total.input') + json_extract(meta, '$.total.output') + json_extract(meta, '$.total.cacheWrite')
+             )), 0) AS fresh,
+             COALESCE(SUM(json_extract(meta, '$.total.cacheRead')), 0) AS cache_read,
              SUM(json_extract(meta, '$.total.cost')) AS cost,
              SUM(json_extract(meta, '$.baseline.cost')) AS baseline_cost
       FROM messages WHERE agent_id = ? AND role = 'usage' AND created_at >= ?
@@ -189,5 +229,65 @@ export const AgentSessions = {
   remove: (agentId, kind) => db.prepare('DELETE FROM agent_sessions WHERE agent_id = ? AND kind = ?').run(agentId, kind),
   clear: (agentId) => db.prepare('DELETE FROM agent_sessions WHERE agent_id = ?').run(agentId),
 };
+
+export const Schedules = {
+  all: () => db.prepare('SELECT * FROM schedules ORDER BY time, id').all(),
+  enabled: () => db.prepare('SELECT * FROM schedules WHERE enabled = 1 ORDER BY time, id').all(),
+  forAgent: (aid) => db.prepare('SELECT * FROM schedules WHERE agent_id = ? ORDER BY time, id').all(aid),
+  get: (id) => db.prepare('SELECT * FROM schedules WHERE id = ?').get(id),
+  create: (agent_id, text, time, days) => {
+    const r = db.prepare('INSERT INTO schedules (agent_id, text, time, days, created_at) VALUES (?, ?, ?, ?, ?)').run(agent_id, text, time, days, now());
+    return Schedules.get(Number(r.lastInsertRowid));
+  },
+  update: (id, fields) => {
+    const keys = Object.keys(fields);
+    if (!keys.length) return Schedules.get(id);
+    db.prepare(`UPDATE schedules SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...keys.map((k) => fields[k]), id);
+    return Schedules.get(id);
+  },
+  remove: (id) => db.prepare('DELETE FROM schedules WHERE id = ?').run(id),
+};
+
+export const Snapshots = {
+  get: (id) => db.prepare('SELECT * FROM turn_snapshots WHERE id = ?').get(id),
+  create: (agent_id, before_tree) => {
+    const r = db.prepare('INSERT INTO turn_snapshots (agent_id, before_tree, created_at) VALUES (?, ?, ?)').run(agent_id, before_tree, now());
+    return Snapshots.get(Number(r.lastInsertRowid));
+  },
+  finish: (id, after_tree, files) => {
+    db.prepare('UPDATE turn_snapshots SET after_tree = ?, files = ? WHERE id = ?').run(after_tree, files, id);
+    return Snapshots.get(id);
+  },
+  markUndone: (id) => db.prepare('UPDATE turn_snapshots SET undone_at = ? WHERE id = ?').run(now(), id),
+  /** Keeps only the newest `keep` rows per agent so the table (and the git objects it references) stay small. */
+  prune: (aid, keep = 30) =>
+    db.prepare('DELETE FROM turn_snapshots WHERE agent_id = ? AND id NOT IN (SELECT id FROM turn_snapshots WHERE agent_id = ? ORDER BY id DESC LIMIT ?)').run(aid, aid, keep),
+};
+
+export const Settings = {
+  get: (key, fallback = null) => {
+    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+    return row ? row.value : fallback;
+  },
+  set: (key, value) => db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value == null ? null : String(value)),
+  all: () => Object.fromEntries(db.prepare('SELECT key, value FROM settings').all().map((r) => [r.key, r.value])),
+};
+
+/** Per-agent activity for one local day: how many requests came in, the last reply, and what it cost. */
+export function dailyActivity(sinceMs, untilMs = now()) {
+  return db.prepare(`
+    SELECT a.id, a.name, a.kind, a.status, a.workspace_id, w.name AS workspace,
+           (SELECT COUNT(*) FROM messages m WHERE m.agent_id = a.id AND m.role = 'user' AND m.created_at >= ? AND m.created_at < ?) AS requests,
+           (SELECT COUNT(*) FROM messages m WHERE m.agent_id = a.id AND m.role = 'error' AND m.created_at >= ? AND m.created_at < ?) AS errors,
+           (SELECT content FROM messages m WHERE m.agent_id = a.id AND m.role = 'assistant' AND m.created_at >= ? AND m.created_at < ? ORDER BY id DESC LIMIT 1) AS last_reply,
+           (SELECT COALESCE(SUM(COALESCE(json_extract(meta, '$.total.fresh'), json_extract(meta, '$.total.input') + json_extract(meta, '$.total.output') + json_extract(meta, '$.total.cacheWrite'))), 0)
+              FROM messages m WHERE m.agent_id = a.id AND m.role = 'usage' AND m.created_at >= ? AND m.created_at < ?) AS fresh,
+           (SELECT SUM(json_extract(meta, '$.total.cost')) FROM messages m WHERE m.agent_id = a.id AND m.role = 'usage' AND m.created_at >= ? AND m.created_at < ?) AS cost,
+           (SELECT COALESCE(SUM(files), 0) FROM turn_snapshots s WHERE s.agent_id = a.id AND s.created_at >= ? AND s.created_at < ? AND s.undone_at IS NULL) AS files
+    FROM agents a JOIN workspaces w ON w.id = a.workspace_id
+    ORDER BY a.updated_at DESC
+  `).all(sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs)
+    .filter((r) => r.requests > 0 || r.fresh > 0);
+}
 
 export default db;

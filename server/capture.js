@@ -61,7 +61,23 @@ const LINE_BREAK = new RegExp(String.fromCharCode(13) + '?' + String.fromCharCod
 // narrower requests get laid out at ~492px and merely cropped, cutting off the right edge.
 export const MIN_CAPTURE_WIDTH = 500;
 
-export function captureScreenshot({ agentId, url, file, html, width = MIN_CAPTURE_WIDTH, height = 844, fullPage = false, waitMs = 1500, workspacePath }) {
+// Wraps the resolved target in an iframe scaled with CSS `zoom` so a document wider than the
+// phone's capture viewport (a print poster laid out at, say, 1600px) still shows in full instead
+// of being cropped to its left edge. fitWidthPx is the target's own natural CSS width.
+function buildFitWidthWrapper(targetHref, fitWidthPx, w, h, scratchDir) {
+  const k = w / fitWidthPx;
+  const iframeH = Math.ceil(h / k);
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{margin:0;padding:0;overflow:hidden;background:#fff}
+iframe{border:0;display:block;width:${fitWidthPx}px;height:${iframeH}px;zoom:${k};transform-origin:top left}
+</style></head><body><iframe src="${targetHref}"></iframe></body></html>`;
+  fs.mkdirSync(scratchDir, { recursive: true });
+  const p = path.join(scratchDir, `fitwidth-${Date.now()}.html`);
+  fs.writeFileSync(p, html, 'utf8');
+  return { href: pathToFileURL(p).href, cleanup: () => { try { fs.unlinkSync(p); } catch {} } };
+}
+
+export function captureScreenshot({ agentId, url, file, html, width = MIN_CAPTURE_WIDTH, height = 844, fullPage = false, waitMs = 1500, workspacePath, fitWidthPx }) {
   const bin = findBrowserBin();
   if (!bin) return Promise.reject(new Error('Edge 또는 Chrome을 찾지 못해 캡처할 수 없습니다'));
   const w = Math.max(MIN_CAPTURE_WIDTH, Math.min(1600, Number(width) || MIN_CAPTURE_WIDTH));
@@ -72,10 +88,13 @@ export function captureScreenshot({ agentId, url, file, html, width = MIN_CAPTUR
   const out = path.join(dir, name);
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'ar-capture-'));
   const target = resolveTarget({ url, file, html }, workspacePath, profile);
+  const fitWidth = Number(fitWidthPx) > 0 ? Number(fitWidthPx) : null;
+  const wrapper = fitWidth ? buildFitWidthWrapper(target.href, fitWidth, w, h, profile) : null;
+  const shootHref = wrapper ? wrapper.href : target.href;
   const args = [
     '--headless=new', '--disable-gpu', '--hide-scrollbars', '--no-first-run', '--no-default-browser-check',
     `--user-data-dir=${profile}`, `--window-size=${w},${h}`, `--virtual-time-budget=${Math.max(0, Math.min(15000, Number(waitMs) || 0))}`,
-    `--screenshot=${out}`, target.href,
+    `--screenshot=${out}`, shootHref,
   ];
   // The launcher process exits right away on Windows and a detached child writes the PNG a
   // second or two later, so wait for the file rather than trusting the exit event.
@@ -88,7 +107,7 @@ export function captureScreenshot({ agentId, url, file, html, width = MIN_CAPTUR
     execFile(bin, args, { timeout: 45_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, async (err, _stdout, stderr) => {
       const ok = await waitForFile(Date.now() + 20_000);
       // Give the detached child a moment to release the temp profile before deleting it.
-      setTimeout(() => { target.cleanup?.(); fs.rm(profile, { recursive: true, force: true }, () => {}); }, 3000);
+      setTimeout(() => { target.cleanup?.(); wrapper?.cleanup?.(); fs.rm(profile, { recursive: true, force: true }, () => {}); }, 3000);
       if (!ok) {
         const tail = String(stderr || '').split(LINE_BREAK).filter((l) => /ERROR|FATAL|screenshot/i.test(l)).slice(-3).join(' | ');
         return reject(new Error(`캡처 실패: ${err?.message || tail || '브라우저가 이미지를 만들지 못했습니다'}`));

@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
 import { DATA_DIR, SERVER_DIR } from '../paths.js';
-import { PHONE_STYLE_PROMPT, withPhoneReminder } from '../style.js';
+import { PHONE_STYLE_PROMPT, withPhoneReminderShort } from '../style.js';
 import { normalizeClaudeUsage } from '../tokens.js';
 
 export function findClaudeBin() {
@@ -41,15 +41,21 @@ export function cleanClaudeEnv(cfg) {
   return env;
 }
 
+/** Common flags for a one-shot, tool-less, context-free call: no default Claude Code system
+ * prompt (replaced by `systemPrompt`), no tool definitions loaded, no session file written. */
+function onceArgs(model, systemPrompt) {
+  return ['-p', '--output-format', 'json', '--model', model, '--max-turns', '1', '--tools', '', '--permission-mode', 'dontAsk', '--strict-mcp-config', '--disable-slash-commands', '--no-session-persistence', '--system-prompt', systemPrompt];
+}
+
 /**
  * One-shot, tool-less, context-free call used for triage. Resolves with parsed
  * structured output (or null on failure). Never touches the agent's session.
  */
-export function runClaudeOnce({ cwd, prompt, model = 'haiku', schema, cfg, onModel, onUsage, timeoutMs = 60_000 }) {
+export function runClaudeOnce({ cwd, prompt, systemPrompt = '', model = 'haiku', schema, cfg, onModel, onUsage, timeoutMs = 60_000 }) {
   return new Promise((resolve) => {
     // No tools at all, one turn: the model must answer in text. (--json-schema needs an internal
     // tool call, which conflicts with disabling tools, so we ask for JSON text and parse it.)
-    const args = ['-p', '--output-format', 'json', '--model', model, '--max-turns', '1', '--disallowedTools', '*', '--permission-mode', 'dontAsk'];
+    const args = onceArgs(model, systemPrompt);
     void schema;
     const child = spawn(findClaudeBin(), args, { cwd, env: cleanClaudeEnv(cfg), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '';
@@ -78,9 +84,9 @@ export function runClaudeOnce({ cwd, prompt, model = 'haiku', schema, cfg, onMod
 }
 
 /** One-shot, tool-less call that returns the model's text (used for 대화 정리 summaries). */
-export function runClaudeOnceText({ cwd, prompt, model = 'haiku', cfg, timeoutMs = 90_000 }) {
+export function runClaudeOnceText({ cwd, prompt, systemPrompt = '', model = 'haiku', cfg, timeoutMs = 90_000 }) {
   return new Promise((resolve) => {
-    const args = ['-p', '--output-format', 'json', '--model', model, '--max-turns', '1', '--disallowedTools', '*', '--permission-mode', 'dontAsk'];
+    const args = onceArgs(model, systemPrompt);
     const child = spawn(findClaudeBin(), args, { cwd, env: cleanClaudeEnv(cfg), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '';
     child.stdout.setEncoding('utf8');
@@ -167,9 +173,10 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
   const child = spawn(bin, args, { cwd: workspace.path, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
 
   child.stdin.on('error', () => {});
-  child.stdin.end(withPhoneReminder(text));
+  child.stdin.end(claudeStdinText(text, opts));
 
   let gotResult = false;
+  let lastContext = 0;
   let stderrTail = '';
   child.stderr.setEncoding('utf8');
   child.stderr.on('data', (d) => {
@@ -204,6 +211,8 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
     }
     if (ev.type === 'assistant' && ev.message?.content) {
       if (ev.parent_tool_use_id) return; // subagent chatter: skip
+      const u = ev.message.usage;
+      if (u) lastContext = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
       for (const block of ev.message.content) {
         if (block.type === 'text' && block.text?.trim()) hooks.onMessage?.('assistant', block.text);
         else if (block.type === 'tool_use') hooks.onMessage?.('tool', summarizeToolUse(block.name, block.input), { tool: block.name, id: block.id, ...toolStats(block.name, block.input) });
@@ -232,6 +241,7 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
         cost: ev.total_cost_usd,
         denials: ev.permission_denials,
         usage: normalizeClaudeUsage(ev),
+        contextTokens: lastContext,
         // modelUsage also lists subagent models (Explore helpers run on Haiku); the main model is
         // the one that spent the most, not whichever key happens to come first.
         model: Object.entries(ev.modelUsage || {}).sort((a, b) => (b[1]?.costUSD || 0) - (a[1]?.costUSD || 0))[0]?.[0] || null,
@@ -255,11 +265,33 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
   return child;
 }
 
+/** Text written to Claude's stdin. The phone-tone reminder is for what the owner reads, so it's
+ * skipped on the plan stage (its output is internal ExitPlanMode text, not shown as a chat answer)
+ * and on cross-provider reviews (the reader is the other model, not the owner). Short form: the
+ * turn's --append-system-prompt already carries the full guide, so the reminder only needs to
+ * point back at it instead of accumulating a full copy in every turn's conversation history. */
+export function claudeStdinText(text, opts = {}) {
+  const skip = opts.stage === 'plan' || opts.phase === 'review';
+  return skip ? text : withPhoneReminderShort(text);
+}
+
 export function buildClaudeArgs(agent, mcpPath, opts = {}) {
   // `capture` only writes into data/captures on this PC, so it never needs a phone approval.
   // WebFetch is also pre-allowed: it's read-only, and a link the user attaches should just get read.
-  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-prompt-tool', 'mcp__approver__approve', '--mcp-config', mcpPath, '--allowedTools', 'mcp__approver__capture', 'mcp__approver__restart_server', 'WebFetch', '--append-system-prompt', PHONE_STYLE_PROMPT];
+  // --strict-mcp-config keeps every turn from also loading the user's global ~/.claude.json MCP
+  // servers (unauthorized ones still ship their tool definitions in the prefix); the approver
+  // server above still loads because it's passed via --mcp-config.
+  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-prompt-tool', 'mcp__approver__approve', '--mcp-config', mcpPath, '--strict-mcp-config', '--allowedTools', 'mcp__approver__capture', 'mcp__approver__restart_server', 'WebFetch'];
+  const isPlanOrReview = opts.stage === 'plan' || opts.phase === 'review';
+  // Plan output goes to ExitPlanMode (read by the executor turn, not the owner) and review output
+  // goes to the other model, so neither needs the phone-tone guide — skipping it there also keeps
+  // it from being re-sent as part of the plan/review text that later turns carry along.
+  if (!isPlanOrReview) args.push('--append-system-prompt', PHONE_STYLE_PROMPT);
   if (agent.session_id) args.push('--resume', agent.session_id);
+  // Plan and cross-review turns start a fresh session every time, so they pay the full system
+  // prompt + tool + skill definitions from zero; skills add nothing when the turn can't edit anyway.
+  if (isPlanOrReview) args.push('--disable-slash-commands');
+  if (opts.budgetUsd) args.push('--max-budget-usd', String(opts.budgetUsd));
   if (opts.tools) {
     const tools = Array.isArray(opts.tools) ? opts.tools : [opts.tools];
     args.push('--tools', ...tools);

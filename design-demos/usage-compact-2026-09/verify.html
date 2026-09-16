@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>검증 — B안 실제 스타일시트</title>
+<link rel="stylesheet" href="../../public/style.css">
+<style>
+  body { background: #EEE; padding: 16px; }
+  .frame { width: 375px; margin: 0 auto 24px; background: #fff; border: 1px solid #ccc; }
+  .frame + .frame { margin-top: 24px; }
+  .cap { text-align: center; font: 12px sans-serif; color: #666; margin-bottom: 6px; }
+</style>
+</head>
+<body>
+
+<div class="cap">375px · 접힘 상태 (0% / 68% / 100%)</div>
+<div class="frame">
+  <div class="pc">
+    <div class="h">leebeegle <em>Connected</em></div>
+    <div class="sub">Windows PC · 마지막 동기화 2분 전</div>
+    <div class="stat"><span>CPU <b>3%</b></span><span>RAM <b>34%</b></span></div>
+    <div id="usage">
+      <button type="button" class="limits" data-usage-toggle aria-expanded="false">
+        <div class="pill"><span class="pt">5시간 <b>0%</b></span><span class="pl"><i style="width:0%"></i></span></div>
+        <div class="pill warm"><span class="pt">주간 <b>68%</b></span><span class="pl"><i style="width:68%"></i></span></div>
+        <div class="pill hot"><span class="pt">Fable <b>100%</b></span><span class="pl"><i style="width:100%"></i></span></div>
+      </button>
+      <div class="limits-hint">탭하면 리셋 시각을 볼 수 있어요</div>
+    </div>
+  </div>
+  <div class="rail">
+    <button class="chip on">전체 <b>6</b></button>
+    <button class="chip">승인 필요 <b>1</b></button>
+    <button class="chip">작업 중 <b>2</b></button>
+    <button class="chip">완료 <b>3</b></button>
+  </div>
+</div>
+
+<div class="cap">375px · 펼침 상태 (탭한 뒤 리셋 시각 카드)</div>
+<div class="frame">
+  <div class="pc">
+    <div class="h">leebeegle <em>Connected</em></div>
+    <div class="sub">Windows PC · 마지막 동기화 2분 전</div>
+    <div class="stat"><span>CPU <b>3%</b></span><span>RAM <b>34%</b></span></div>
+    <div id="usage">
+      <button type="button" class="limits" data-usage-toggle aria-expanded="true">
+        <div class="pill"><span class="pt">5시간 <b>0%</b></span><span class="pl"><i style="width:0%"></i></span></div>
+        <div class="pill warm"><span class="pt">주간 <b>68%</b></span><span class="pl"><i style="width:68%"></i></span></div>
+        <div class="pill hot"><span class="pt">Fable <b>100%</b></span><span class="pl"><i style="width:100%"></i></span></div>
+      </button>
+      <div class="limits-card">
+        <div class="usage-popover-head"><strong>Claude 사용 한도</strong><button type="button" data-usage-refresh>새로고침</button></div>
+        <div class="usage-popover-row"><div><strong>5시간</strong><small>리셋 오후 6시</small></div><b>0%</b></div>
+        <div class="usage-popover-row"><div><strong>주간</strong><small>리셋 9월 19일</small></div><b class="warm">68%</b></div>
+        <div class="usage-popover-row"><div><strong>Fable</strong><small>리셋 9월 17일</small></div><b class="hot">100%</b></div>
+      </div>
+    </div>
+  </div>
+  <div class="rail">
+    <button class="chip on">전체 <b>6</b></button>
+    <button class="chip">승인 필요 <b>1</b></button>
+  </div>
+</div>
+
+</body>
+</html>

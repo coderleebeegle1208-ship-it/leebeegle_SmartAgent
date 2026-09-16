@@ -31,3 +31,14 @@ export const PHONE_STYLE_REMINDER = '(답변 형식: 개발을 모르는 대표�
 export function withPhoneReminder(text) {
   return `${text}\n\n${PHONE_STYLE_REMINDER}`;
 }
+
+/**
+ * Claude-only short form of the same reminder. Claude already received the full
+ * PHONE_STYLE_PROMPT via --append-system-prompt this same turn, so the reminder only needs to
+ * point back at it instead of repeating it — unlike Codex, which has no system-prompt flag and
+ * so never gets the full guide injected alongside the reminder.
+ */
+export const PHONE_STYLE_REMINDER_SHORT = '(답변 형식: 시스템 지침의 "폰 화면용" 규칙 그대로 — 쉬운 말, 결론부터 5문장 이내.)';
+export function withPhoneReminderShort(text) {
+  return `${text}\n\n${PHONE_STYLE_REMINDER_SHORT}`;
+}

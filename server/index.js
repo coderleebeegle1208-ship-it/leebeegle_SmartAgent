@@ -8,21 +8,25 @@ import { WebSocketServer } from 'ws';
 import { loadConfig } from './config.js';
 import { PUBLIC_DIR, ROOT_DIR } from './paths.js';
 import { spawn } from 'node:child_process';
-import { AgentSessions, Workspaces, Agents, Messages, Approvals, PushSubs } from './db.js';
+import { AgentSessions, Workspaces, Agents, Messages, Approvals, PushSubs, Schedules, Settings, Snapshots } from './db.js';
 import { bus, emit } from './bus.js';
 import { initPush, sendPush } from './push.js';
-import { gitSummary, gitCommitDiff, gitRemote, setGitRemote } from './git.js';
-import { requestApproval, waitForApproval, resolveApproval } from './approvals.js';
+import { gitSummary, gitCommitDiff, gitRemote, setGitRemote, restoreTree } from './git.js';
+import { requestApproval, waitForApproval, resolveApproval, setBlanketAllow, blanketAllow } from './approvals.js';
+import { DAY_LABEL, describeDays, digestSettings, isValidTime, nextDue, normalizeDays, runSchedule, sendDigestPush, startScheduler } from './scheduler.js';
+import { buildDigest } from './digest.js';
 import { startPrompt, stopAgent, isRunning, runningIds, executePlan, switchProvider, compactAgent } from './runners/index.js';
 import { findClaudeBin } from './runners/claude.js';
 import { findCodexEntry } from './runners/codex.js';
 import { getUsage } from './usage.js';
 import { CAPTURE_DIR, captureScreenshot, findBrowserBin } from './capture.js';
-import { MODEL_CATALOG, isModelAllowed } from './models.js';
+import { CODEX_MODEL_CATALOG, MODEL_CATALOG, codexDefaults, isCodexModelAllowed, isModelAllowed } from './models.js';
 import { UPLOAD_DIR, findFfmpeg, loadUpload, saveUpload } from './uploads.js';
+import { copySkill, deleteSkill, listImportableSkills, listSkills, parseFrontmatter, validateSkillName, writeSkill } from './skills.js';
 
 const cfg = loadConfig();
 initPush(cfg);
+startScheduler(cfg);
 
 // A restart means no agent process survived: clear stale "working"/"needs_attention" states.
 for (const a of Agents.all()) {
@@ -80,6 +84,9 @@ function agentView(a) {
     running: isRunning(a.id),
     pending_approvals: Approvals.pendingForAgent(a.id).length,
     provider_sessions: { claude: !!saved.claude, codex: !!saved.codex },
+    compact_limit: cfg.compactAfterTokens || 0,
+    blanket_allow: !!blanketAllow(a.id),
+    schedules: Schedules.forAgent(a.id).length,
   };
 }
 
@@ -136,6 +143,7 @@ api.get('/state', (req, res) => {
     computer: { name: os.hostname(), platform: process.platform, ...stats, connected: true },
     tools: { claude: findClaudeBin(), codex: !!findCodexEntry(), capture: !!findBrowserBin(), ffmpeg: !!findFfmpeg() },
     models: MODEL_CATALOG,
+    codex: { models: CODEX_MODEL_CATALOG, ...codexDefaults() },
     workspaces,
     agents,
     counts,
@@ -143,7 +151,8 @@ api.get('/state', (req, res) => {
 });
 
 api.get('/usage', async (req, res) => {
-  res.json(await getUsage(req.query.refresh === '1'));
+  const provider = req.query.provider === 'codex' ? 'codex' : 'claude';
+  res.json(await getUsage(provider, req.query.refresh === '1'));
 });
 
 api.post('/workspaces', (req, res) => {
@@ -201,15 +210,18 @@ api.get('/browse', (req, res) => {
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 api.post('/agents', (req, res) => {
-  const { workspace_id, kind, name, model, effort, plan_effort, exec_effort, permission_mode, pipeline, triage_model, plan_model, exec_model, confirm_plan, collab_mode } = req.body || {};
+  const { workspace_id, kind, name, model, effort, codex_model, codex_effort, plan_effort, exec_effort, permission_mode, pipeline, triage_model, plan_model, exec_model, confirm_plan, collab_mode } = req.body || {};
   const ws = Workspaces.get(Number(workspace_id));
   if (!ws) return res.status(400).json({ error: 'workspace not found' });
   const k = kind === 'codex' ? 'codex' : 'claude';
   let agent = Agents.create(ws.id, k, name?.trim() || (k === 'codex' ? 'Codex' : 'Claude'));
   const fields = {};
-  if (isModelAllowed('manual', model)) fields.model = model;
+  if (k === 'codex') {
+    if (isCodexModelAllowed(codex_model || model)) fields.codex_model = codex_model || model;
+    if (EFFORTS.includes(codex_effort || effort)) fields.codex_effort = codex_effort || effort;
+  } else if (isModelAllowed('manual', model)) fields.model = model;
   // A single "강도" chosen at creation applies to every stage until it is tuned per stage in the composer.
-  if (EFFORTS.includes(effort)) { fields.effort = effort; fields.plan_effort = effort; fields.exec_effort = effort; }
+  if (k === 'claude' && EFFORTS.includes(effort)) { fields.effort = effort; fields.plan_effort = effort; fields.exec_effort = effort; }
   if (EFFORTS.includes(plan_effort)) fields.plan_effort = plan_effort;
   if (EFFORTS.includes(exec_effort)) fields.exec_effort = exec_effort;
   if (['ask', 'acceptEdits', 'auto'].includes(permission_mode)) fields.permission_mode = permission_mode;
@@ -245,7 +257,9 @@ api.patch('/agents/:id', (req, res) => {
   if (typeof req.body?.name === 'string') fields.name = req.body.name.trim() || 'agent';
   if (['ask', 'acceptEdits', 'auto'].includes(req.body?.permission_mode)) fields.permission_mode = req.body.permission_mode;
   if ('model' in (req.body || {})) fields.model = isModelAllowed('manual', req.body.model) ? req.body.model : null;
+  if ('codex_model' in (req.body || {})) fields.codex_model = isCodexModelAllowed(req.body.codex_model) ? req.body.codex_model : null;
   if ('effort' in (req.body || {})) fields.effort = EFFORTS.includes(req.body.effort) ? req.body.effort : null;
+  if ('codex_effort' in (req.body || {})) fields.codex_effort = EFFORTS.includes(req.body.codex_effort) ? req.body.codex_effort : null;
   if ('plan_effort' in (req.body || {})) fields.plan_effort = EFFORTS.includes(req.body.plan_effort) ? req.body.plan_effort : null;
   if ('exec_effort' in (req.body || {})) fields.exec_effort = EFFORTS.includes(req.body.exec_effort) ? req.body.exec_effort : null;
   if (['auto', 'manual'].includes(req.body?.pipeline)) fields.pipeline = req.body.pipeline;
@@ -259,8 +273,21 @@ api.patch('/agents/:id', (req, res) => {
     fields.session_id = null;
     AgentSessions.clear(id);
   }
+  // Changing the running model mid-conversation means the next turn re-writes the whole
+  // conversation into that model's own cache — a one-time cost worth flagging, not hiding by
+  // clearing the session (that would also throw away the conversation memory).
+  const modelFields = ['model', 'codex_model', 'exec_model'];
+  const modelChanged = current.session_id && modelFields.some((f) => f in fields && fields[f] !== current[f]);
   const a = Agents.update(id, fields);
   if (req.body?.clear_messages) Messages.clear(id);
+  if (modelChanged) {
+    // Summarize into a memo instead of resuming: the alternative is re-writing the whole
+    // conversation into the new model's cache on the next turn, which costs far more.
+    compactAgent(id, cfg, { reason: 'model-change' }).catch(() => {
+      const m = Messages.add(id, 'system', '실행 모델이 바뀌어 다음 지시는 대화를 새 모델에 다시 기억시킵니다(한 번만 비용이 더 듭니다).');
+      emit('message', { agent_id: id, message: m });
+    });
+  }
   emit('agent.updated', { agent: agentView(a) });
   res.json(agentView(a));
 });
@@ -317,12 +344,193 @@ api.post('/agents/:id/stop', (req, res) => {
   res.json({ ok: stopped });
 });
 
+// ---------- skills (/이름 slash commands) ----------
+function agentWorkspaceOr404(req, res) {
+  const agent = Agents.get(Number(req.params.id));
+  if (!agent) { res.status(404).json({ error: 'agent not found' }); return null; }
+  const ws = Workspaces.get(agent.workspace_id);
+  if (!ws) { res.status(404).json({ error: 'workspace not found' }); return null; }
+  return ws;
+}
+api.get('/agents/:id/skills', (req, res) => {
+  const ws = agentWorkspaceOr404(req, res);
+  if (!ws) return;
+  res.json(listSkills(ws.path));
+});
+api.get('/agents/:id/skills/importable', (req, res) => {
+  const ws = agentWorkspaceOr404(req, res);
+  if (!ws) return;
+  res.json(listImportableSkills(ws.path, Workspaces.all()));
+});
+api.post('/agents/:id/skills/import', (req, res) => {
+  const ws = agentWorkspaceOr404(req, res);
+  if (!ws) return;
+  const { sourceWorkspaceId, name, overwrite, move } = req.body || {};
+  const scope = req.body?.scope === 'user' ? 'user' : req.body?.scope === 'project' ? 'project' : null;
+  if (!scope) return res.status(400).json({ error: 'scope는 user 또는 project여야 합니다' });
+  const sourceWs = Workspaces.get(Number(sourceWorkspaceId));
+  if (!sourceWs) return res.status(404).json({ error: '원본 프로젝트를 찾을 수 없습니다' });
+  const srcDir = path.join(sourceWs.path, '.claude', 'skills', String(name || ''));
+  try {
+    const saved = copySkill({ srcDir, wsPath: ws.path, scope, name, overwrite: !!overwrite, move: !!move });
+    res.json(saved);
+  } catch (e) {
+    if (e.code === 'EXISTS') return res.status(409).json({ error: e.message, exists: true });
+    res.status(400).json({ error: e.message });
+  }
+});
+api.get('/agents/:id/skills/:name', (req, res) => {
+  const ws = agentWorkspaceOr404(req, res);
+  if (!ws) return;
+  const skill = listSkills(ws.path).find((s) => s.name === req.params.name && (!req.query.scope || s.scope === req.query.scope));
+  if (!skill) return res.status(404).json({ error: '스킬을 찾을 수 없습니다' });
+  let body = '';
+  try { body = parseFrontmatter(fs.readFileSync(skill.file, 'utf8')).body; } catch {}
+  res.json({ ...skill, body });
+});
+api.put('/agents/:id/skills/:name', (req, res) => {
+  const ws = agentWorkspaceOr404(req, res);
+  if (!ws) return;
+  const name = req.params.name;
+  if (!validateSkillName(name)) return res.status(400).json({ error: '스킬 이름은 소문자·숫자·하이픈만 사용할 수 있습니다' });
+  const scope = req.body?.scope === 'user' ? 'user' : req.body?.scope === 'project' ? 'project' : null;
+  if (!scope) return res.status(400).json({ error: 'scope는 user 또는 project여야 합니다' });
+  const description = String(req.body?.description || '').trim();
+  if (!description) return res.status(400).json({ error: '설명을 입력하세요' });
+  const body = String(req.body?.body || '').trim();
+  if (!body) return res.status(400).json({ error: '내용을 입력하세요' });
+  try {
+    const saved = writeSkill({ wsPath: ws.path, scope, name, description, body });
+    res.json(saved);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+api.delete('/agents/:id/skills/:name', (req, res) => {
+  const ws = agentWorkspaceOr404(req, res);
+  if (!ws) return;
+  const scope = req.query.scope === 'user' ? 'user' : req.query.scope === 'project' ? 'project' : null;
+  if (!scope) return res.status(400).json({ error: 'scope는 user 또는 project여야 합니다' });
+  try {
+    deleteSkill({ wsPath: ws.path, scope, name: req.params.name });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 api.post('/approvals/:id', (req, res) => {
-  const { decision, message, updatedInput } = req.body || {};
+  const { decision, message, updatedInput, scope } = req.body || {};
   if (!['allow', 'deny'].includes(decision)) return res.status(400).json({ error: 'decision must be allow|deny' });
-  const r = resolveApproval(Number(req.params.id), decision, { message, updatedInput });
+  const r = resolveApproval(Number(req.params.id), decision, { message, updatedInput, scope: scope === 'run' ? 'run' : null });
   if (!r) return res.status(404).json({ error: 'approval not pending' });
   res.json(r);
+});
+// "이번 작업 동안 모두 허용" can be switched on or off again mid-run from the phone.
+api.post('/agents/:id/blanket', (req, res) => {
+  const id = Number(req.params.id);
+  const a = Agents.get(id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  const on = !!req.body?.on;
+  if (on && !(isRunning(id) || a.status === 'working' || a.status === 'needs_attention')) return res.status(400).json({ error: '진행 중인 작업이 없습니다' });
+  setBlanketAllow(id, on);
+  if (on) {
+    for (const ap of Approvals.pendingForAgent(id)) if (ap.tool_name !== 'AskUserQuestion') resolveApproval(ap.id, 'allow');
+  }
+  res.json(agentView(Agents.get(id)));
+});
+
+// ---------- 되돌리기: revert everything one run changed ----------
+api.post('/agents/:id/undo/:snapshot', async (req, res) => {
+  const id = Number(req.params.id);
+  const a = Agents.get(id);
+  if (!a) return res.status(404).json({ error: 'not found' });
+  if (isRunning(id) || a.status === 'working' || a.status === 'needs_attention') return res.status(400).json({ error: '작업이 끝난 뒤 되돌리세요' });
+  const snap = Snapshots.get(Number(req.params.snapshot));
+  if (!snap || snap.agent_id !== id || !snap.after_tree) return res.status(404).json({ error: '되돌릴 기록을 찾을 수 없습니다' });
+  if (snap.undone_at) return res.status(400).json({ error: '이미 되돌린 작업입니다' });
+  const ws = Workspaces.get(a.workspace_id);
+  if (!ws) return res.status(404).json({ error: 'workspace not found' });
+  try {
+    const r = await restoreTree(ws.path, snap.after_tree, snap.before_tree);
+    Snapshots.markUndone(snap.id);
+    const m = Messages.add(id, 'system', `되돌림 · 파일 ${r.files}개를 작업 전 상태로 돌려놓았습니다`, { snapshot_id: snap.id, undone: true });
+    emit('message', { agent_id: id, message: m });
+    emit('snapshot.undone', { agent_id: id, snapshot_id: snap.id });
+    res.json({ ok: true, files: r.files });
+  } catch (e) {
+    res.status(400).json({ error: e.message, detail: e.detail || null });
+  }
+});
+
+// ---------- 예약 실행 ----------
+function scheduleView(s) {
+  return { ...s, days_label: describeDays(s.days), next_at: s.enabled ? nextDue(s.time, s.days) : null };
+}
+api.get('/agents/:id/schedules', (req, res) => {
+  if (!Agents.get(Number(req.params.id))) return res.status(404).json({ error: 'not found' });
+  res.json({ schedules: Schedules.forAgent(Number(req.params.id)).map(scheduleView), day_labels: DAY_LABEL });
+});
+api.post('/agents/:id/schedules', (req, res) => {
+  const id = Number(req.params.id);
+  if (!Agents.get(id)) return res.status(404).json({ error: 'not found' });
+  const text = String(req.body?.text || '').trim();
+  const time = String(req.body?.time || '').trim();
+  if (!text) return res.status(400).json({ error: '지시 내용을 입력하세요' });
+  if (!isValidTime(time)) return res.status(400).json({ error: '시각은 HH:MM 형식입니다' });
+  const s = Schedules.create(id, text, time, normalizeDays(req.body?.days));
+  emit('agent.updated', { agent: agentView(Agents.get(id)) });
+  res.json(scheduleView(s));
+});
+api.patch('/schedules/:id', (req, res) => {
+  const s = Schedules.get(Number(req.params.id));
+  if (!s) return res.status(404).json({ error: 'not found' });
+  const fields = {};
+  if (typeof req.body?.text === 'string' && req.body.text.trim()) fields.text = req.body.text.trim();
+  if ('time' in (req.body || {})) {
+    if (!isValidTime(req.body.time)) return res.status(400).json({ error: '시각은 HH:MM 형식입니다' });
+    fields.time = req.body.time;
+  }
+  if ('days' in (req.body || {})) fields.days = normalizeDays(req.body.days);
+  if ('enabled' in (req.body || {})) fields.enabled = req.body.enabled ? 1 : 0;
+  res.json(scheduleView(Schedules.update(s.id, fields)));
+});
+api.delete('/schedules/:id', (req, res) => {
+  const s = Schedules.get(Number(req.params.id));
+  if (!s) return res.status(404).json({ error: 'not found' });
+  Schedules.remove(s.id);
+  emit('agent.updated', { agent: agentView(Agents.get(s.agent_id)) });
+  res.json({ ok: true });
+});
+api.post('/schedules/:id/run', (req, res) => {
+  const s = Schedules.get(Number(req.params.id));
+  if (!s) return res.status(404).json({ error: 'not found' });
+  try {
+    res.json(agentView(runSchedule(s, cfg, { manual: true })));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// ---------- 오늘 한 일 요약 ----------
+api.get('/digest', (req, res) => {
+  try {
+    res.json({ ...buildDigest(req.query.date ? String(req.query.date) : undefined), settings: digestSettings() });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+api.post('/digest/send', async (req, res) => {
+  await sendDigestPush();
+  res.json({ ok: true, subscriptions: PushSubs.all().length });
+});
+api.patch('/digest/settings', (req, res) => {
+  if ('enabled' in (req.body || {})) Settings.set('digest_enabled', req.body.enabled ? '1' : '0');
+  if ('time' in (req.body || {})) {
+    if (!isValidTime(req.body.time)) return res.status(400).json({ error: '시각은 HH:MM 형식입니다' });
+    Settings.set('digest_time', req.body.time);
+  }
+  res.json(digestSettings());
 });
 
 api.post('/push/subscribe', (req, res) => {
@@ -412,12 +620,12 @@ api.post('/restart', (req, res) => {
 });
 
 app.post('/internal/capture', requireInternal, async (req, res) => {
-  const { agentId, url, file, html, caption, width, height, full_page, wait_ms } = req.body || {};
+  const { agentId, url, file, html, caption, width, height, full_page, wait_ms, fit_width_px } = req.body || {};
   const agent = Agents.get(Number(agentId));
   if (!agent) return res.status(400).json({ error: 'unknown agent' });
   const workspace = Workspaces.get(agent.workspace_id);
   try {
-    const shot = await captureScreenshot({ agentId: agent.id, url, file, html, width, height, fullPage: !!full_page, waitMs: wait_ms, workspacePath: workspace?.path });
+    const shot = await captureScreenshot({ agentId: agent.id, url, file, html, width, height, fullPage: !!full_page, waitMs: wait_ms, fitWidthPx: fit_width_px, workspacePath: workspace?.path });
     const m = Messages.add(agent.id, 'image', String(caption || '').trim() || '결과 화면', { file: shot.file, width: shot.width, height: shot.height, source: url || file || 'html' });
     emit('message', { agent_id: agent.id, message: m });
     res.json({ ok: true, ...shot });

@@ -25,6 +25,7 @@
         <span id="topbar-title">leebeegle_SmartAgent</span>
       </div>
       <button class="icon-btn" id="btn-refresh" aria-label="새로고침"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></button>
+      <button class="icon-btn" id="btn-agent-menu" hidden aria-label="에이전트 메뉴"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="12" cy="19" r="1.8"/></svg></button>
       <button class="icon-btn" id="btn-settings" aria-label="설정"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2.5"/><circle cx="10" cy="17" r="2.5"/></svg></button>
     </div>
   </header>
@@ -104,7 +105,7 @@
         </select>
       </label>
       <div id="claude-opts">
-        <label>실행 방식
+        <label id="agent-pipeline-field">실행 방식
           <select id="agent-pipeline">
             <option value="auto">교차 모델 · 계획은 Fable, 실행은 Sonnet (한도 절약)</option>
             <option value="manual">단일 모델 · 모델 하나를 직접 지정</option>
@@ -143,14 +144,64 @@
   </dialog>
 
   <!-- agent menu -->
-  <dialog id="dlg-agent-menu">
-    <div class="form" style="padding:8px 0 12px">
-      <button class="arow" data-act="rename">이름 바꾸기</button>
-      <button class="arow" data-act="compact">대화 정리 (요약해 두고 새 대화로)</button>
-      <button class="arow" data-act="reset">새 세션으로 시작 (요약 없이 초기화)</button>
-      <button class="arow" data-act="clear">화면 기록 지우기</button>
-      <button class="arow danger" data-act="delete">에이전트 삭제</button>
-      <div class="row-flex end" style="padding:8px 16px 0"><button class="btn" data-close>닫기</button></div>
+  <dialog id="dlg-agent-menu" class="sheet">
+    <div class="sheet-grip"></div>
+    <div class="sheet-head">
+      <b id="menu-agent-name"></b>
+      <small id="menu-agent-status"></small>
+    </div>
+    <div class="sheet-group">
+      <button class="sheet-item" data-act="rename"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-4-4L4 16z"/></svg><span><b>이름 바꾸기</b></span></button>
+      <button class="sheet-item" data-act="skills"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg><span><b>스킬</b><small>슬래시 명령으로 부르는 지침 관리</small></span></button>
+      <button class="sheet-item" data-act="schedules"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span><b>예약 실행</b><small id="menu-schedule-note">정해진 시각에 지시를 자동으로 보내기</small></span></button>
+    </div>
+    <div class="sheet-group">
+      <button class="sheet-item" data-act="compact"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7l8-4 8 4-8 4-8-4Z"/><path d="M4 12l8 4 8-4"/><path d="M4 17l8 4 8-4"/></svg><span><b>대화 정리</b><small>요약해 두고 새 대화로 이어가기</small></span></button>
+      <button class="sheet-item" data-act="reset"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg><span><b>새 세션으로 시작</b><small>요약 없이 맥락 초기화</small></span></button>
+    </div>
+    <div class="sheet-group">
+      <button class="sheet-item" data-act="clear"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3 6 13v4h4L20 7Z"/><path d="M4 21h9"/></svg><span><b>화면 기록 지우기</b><small>서버 기록은 유지</small></span></button>
+      <button class="sheet-item danger" data-act="delete"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg><span><b>에이전트 삭제</b></span></button>
+    </div>
+    <button class="sheet-cancel" data-close>닫기</button>
+  </dialog>
+
+  <!-- skills -->
+  <dialog id="dlg-skills">
+    <div class="form" id="skills-list-view">
+      <h2>스킬</h2>
+      <p class="muted small">입력창에 <code>/이름</code>으로 부르면 아래 지침이 그대로 전달됩니다. "내 계정 전체"는 이 컴퓨터의 모든 프로젝트에서, "이 프로젝트"는 이 워크스페이스에서만 보입니다.</p>
+      <div id="skills-list"></div>
+      <div class="row-flex end">
+        <button class="btn" type="button" data-close>닫기</button>
+        <button class="btn" type="button" id="skills-import">다른 프로젝트에서 가져오기</button>
+        <button class="btn primary" type="button" id="skills-new">새 스킬 만들기</button>
+      </div>
+    </div>
+    <div class="form" id="skills-import-view" hidden>
+      <h2>다른 프로젝트의 스킬</h2>
+      <p class="muted small">가져오면 복사본이 만들어집니다. 원본은 그대로 남습니다.</p>
+      <div id="skills-import-list"></div>
+      <div class="row-flex end">
+        <button class="btn" type="button" id="skills-import-back">뒤로</button>
+      </div>
+    </div>
+    <div class="form" id="skills-edit-view" hidden>
+      <h2 id="skills-edit-title">새 스킬</h2>
+      <label>이름 <input id="skill-name" placeholder="예: release-checklist" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      <div class="row-flex" id="skill-scope-row">
+        <label class="check"><input type="radio" name="skill-scope" value="user" checked> 내 계정 전체</label>
+        <label class="check"><input type="radio" name="skill-scope" value="project"> 이 프로젝트</label>
+      </div>
+      <label>설명 <input id="skill-desc" placeholder="언제 쓰는 스킬인지 한 줄로"></label>
+      <label>내용 <textarea id="skill-body" rows="10" placeholder="/이름으로 불렀을 때 모델에게 전달할 지침"></textarea></label>
+      <p class="hint">편집하면 이 내용으로 SKILL.md를 다시 씁니다.</p>
+      <p class="error" id="skill-error" hidden></p>
+      <div class="row-flex end">
+        <button class="btn danger" type="button" id="skill-delete" hidden>삭제</button>
+        <button class="btn" type="button" id="skills-cancel">뒤로</button>
+        <button class="btn primary" type="button" id="skill-save">저장</button>
+      </div>
     </div>
   </dialog>
 
@@ -170,10 +221,64 @@
       </div>
       <p class="muted small" id="push-status"></p>
       <hr>
+      <h3>오늘 한 일 요약</h3>
+      <p class="muted small">매일 정한 시각에 에이전트별로 무엇을 했고 얼마나 썼는지 한 장으로 알려드립니다.</p>
+      <div class="row-flex">
+        <label class="check" style="flex:1"><input type="checkbox" id="digest-enabled"> 매일 알림</label>
+        <input type="time" id="digest-time" class="time-input" aria-label="요약 알림 시각">
+      </div>
+      <div class="row-flex">
+        <button class="btn" id="btn-digest-view">오늘 요약 보기</button>
+        <button class="btn" id="btn-digest-send">지금 알림 보내기</button>
+      </div>
+      <hr>
       <div class="row-flex">
         <button class="btn danger" id="btn-logout">토큰 지우기</button>
         <div class="spacer"></div>
         <button class="btn" data-close>닫기</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 예약 실행 -->
+  <dialog id="dlg-schedules">
+    <div class="form" id="sched-list-view">
+      <h2>예약 실행</h2>
+      <p class="muted small">정한 시각이 되면 아래 지시를 이 에이전트에게 자동으로 보냅니다. 그때 다른 작업 중이면 끝난 뒤 15분 안에 이어서 보냅니다.</p>
+      <div id="sched-list"></div>
+      <div class="row-flex end">
+        <button class="btn" type="button" data-close>닫기</button>
+        <button class="btn primary" type="button" id="sched-new">예약 추가</button>
+      </div>
+    </div>
+    <div class="form" id="sched-edit-view" hidden>
+      <h2 id="sched-edit-title">예약 추가</h2>
+      <div class="row-flex">
+        <label style="flex:0 0 auto">시각 <input type="time" id="sched-time" value="09:00" class="time-input"></label>
+        <label style="flex:1">요일
+          <div class="day-chips" id="sched-days" role="group" aria-label="요일"></div>
+        </label>
+      </div>
+      <label>지시 내용 <textarea id="sched-text" rows="5" placeholder="예: 어제 커밋된 내용을 점검하고 문제가 있으면 정리해서 보고해줘"></textarea></label>
+      <p class="error" id="sched-error" hidden></p>
+      <div class="row-flex end">
+        <button class="btn danger" type="button" id="sched-delete" hidden>삭제</button>
+        <button class="btn" type="button" id="sched-cancel">뒤로</button>
+        <button class="btn primary" type="button" id="sched-save">저장</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 오늘 한 일 요약 -->
+  <dialog id="dlg-digest">
+    <div class="form">
+      <h2 id="digest-title">오늘 한 일</h2>
+      <div id="digest-body"></div>
+      <div class="row-flex end">
+        <button class="btn" type="button" id="digest-prev">전날</button>
+        <button class="btn" type="button" id="digest-next">다음날</button>
+        <div class="spacer"></div>
+        <button class="btn" type="button" data-close>닫기</button>
       </div>
     </div>
   </dialog>

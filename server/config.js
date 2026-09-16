@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import webpush from 'web-push';
 import { DATA_DIR } from './paths.js';
 
-const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
+const CONFIG_PATH = process.env.AGENT_REMOTE_CONFIG || path.join(DATA_DIR, 'config.json');
 
 export function loadConfig() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -34,9 +34,18 @@ export function loadConfig() {
     cfg.subagentModel = 'haiku'; // set to "" to let subagents use the main model
     changed = true;
   }
-  if (cfg.compactAfterTokens === undefined) {
-    cfg.compactAfterTokens = 300_000; // context size (tokens read per turn) that triggers 대화 정리; 0 = off
+  if (cfg.tokenOptimizationVersion !== 2) {
+    // v1 capped runaway 200k/300k installs at 100k; v2 tightens further to 50k so every tool
+    // call re-reads less of a growing conversation. An explicit 0 (off) stays respected.
+    if (cfg.compactAfterTokens !== 0) {
+      cfg.compactAfterTokens = Math.min(Number(cfg.compactAfterTokens) || 50_000, 50_000);
+    }
+    cfg.tokenOptimizationVersion = 2;
     changed = true;
+  }
+  if (cfg.planBudgetUsd === undefined) {
+    cfg.planBudgetUsd = 0; // USD ceiling for the plan stage (Fable); 0 = no cap. Triage already
+    changed = true;        // decides whether a plan runs at all, so quality shouldn't be capped once it does.
   }
   if (!cfg.pushSubject) {
     cfg.pushSubject = 'mailto:admin@localhost';

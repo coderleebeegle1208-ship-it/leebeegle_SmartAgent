@@ -41,7 +41,7 @@ export function estimateCost(model, u) {
  * @param {string|null} baselineModel
  */
 export function summarizeRun(stages, baselineModel) {
-  const total = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, tokens: 0, cost: null };
+  const total = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, tokens: 0, fresh: 0, cost: null };
   let costKnown = false;
   const outStages = stages.map((s) => {
     total.input += s.input || 0;
@@ -49,6 +49,8 @@ export function summarizeRun(stages, baselineModel) {
     total.cacheRead += s.cacheRead || 0;
     total.cacheWrite += s.cacheWrite || 0;
     total.tokens += (s.input || 0) + (s.output || 0) + (s.cacheRead || 0) + (s.cacheWrite || 0);
+    // Same basis as the desktop app's "new tokens": what the model processed fresh, cache writes included.
+    total.fresh += (s.input || 0) + (s.output || 0) + (s.cacheWrite || 0);
     const estimated = s.cost == null;
     const cost = estimated ? estimateCost(s.model, s) : s.cost;
     if (cost != null) {
@@ -93,16 +95,18 @@ function fmtUsd(n) {
   return `$${n.toFixed(2)}`;
 }
 
-/** One-line summary for the collapsed card, e.g. "토큰 32.4k · 환산 $0.19 · Fable 단독 대비 61% 절약". */
+/** One-line summary for the collapsed card, e.g. "새 토큰 32.4k · 환산 $0.19 · Fable 단독 대비 61% 절약". */
 /**
- * Headline the way the desktop app counts: "새 토큰" is what the model actually processed fresh
- * (input + output + cache writes); the re-read conversation (cache reads) is shown separately
- * because it is ~10x cheaper per token and otherwise dwarfs everything.
+ * Headline broken into three non-overlapping buckets: "새 토큰" (input + output — what the model
+ * actually read/wrote this turn), "캐시 저장" (cache writes — the one-time cost of re-memorizing a
+ * conversation after a long pause or a model switch), and "다시 읽기" (cache reads — replaying
+ * already-cached conversation, ~10x cheaper per token). The desktop app's "new tokens" figure is
+ * "새 토큰" + "캐시 저장" combined (i.e. `total.fresh`).
  */
 export function usageHeadline(summary) {
   const t = summary.total;
-  const fresh = (t.input || 0) + (t.output || 0) + (t.cacheWrite || 0);
-  const parts = [`새 토큰 ${fmtTokens(fresh)}`];
+  const parts = [`새 토큰 ${fmtTokens((t.input || 0) + (t.output || 0))}`];
+  if (t.cacheWrite) parts.push(`캐시 저장 ${fmtTokens(t.cacheWrite)}`);
   if (t.cacheRead) parts.push(`다시 읽기 ${fmtTokens(t.cacheRead)}`);
   const cost = fmtUsd(t.cost);
   if (cost) parts.push(`환산 ${cost}`);

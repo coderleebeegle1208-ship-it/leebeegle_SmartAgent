@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>B — 선 없는 틴트 블록</title>
+<style>
+:root {
+  --bg: #FFFFFF;
+  --surface: #F7F8F8;
+  --surface-2: #EEF0F2;
+  --line: #E6E8EB;
+  --line-strong: #D5D8DC;
+  --ink: #0F1011;
+  --ink-2: #3C3F44;
+  --ink-3: #6B6F76;
+  --ink-4: #8A8F98;
+  --accent: #5E6AD2;
+  --accent-ink: #4A56B8;
+  --accent-bg: #ECEEFA;
+  --sans: "Inter", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --r-s: 6px; --r-m: 8px; --r-l: 12px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #F3F4F5; font-family: var(--sans); }
+.frame { position: relative; width: 390px; height: 700px; margin: 20px auto; background: var(--bg); overflow: hidden; }
+.topbar { height: 44px; display: flex; align-items: center; padding: 0 14px; border-bottom: 1px solid var(--line); font-size: 14px; font-weight: 600; color: var(--ink); }
+.label { position: absolute; top: 6px; left: 14px; font-size: 11px; font-weight: 700; color: #fff; background: var(--accent); padding: 3px 8px; border-radius: 999px; z-index: 9; }
+.msgs { padding: 16px 14px; display: flex; flex-direction: column; gap: 10px; }
+.bubble { max-width: 82%; padding: 10px 13px; border-radius: 14px; font-size: 13px; line-height: 1.5; }
+.bubble.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+.bubble.agent { align-self: flex-start; background: var(--surface); color: var(--ink-2); border-bottom-left-radius: 4px; }
+
+/* --- composer: B. borderless tint blocks --- */
+.composer { position: absolute; left: 0; right: 0; bottom: 0; padding: 10px 12px 14px; background: var(--bg); }
+.chips { display: flex; align-items: center; gap: 6px; padding: 0 2px 8px; }
+.chip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; height: 28px; padding: 0 10px; border-radius: 10px; background: var(--surface); color: var(--ink-2); font-size: 12px; font-weight: 600; border: 0; white-space: nowrap; }
+.chip svg { width: 11px; height: 11px; color: var(--ink-4); }
+.spacer { flex: 1; }
+.review { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--ink-2); font-weight: 600; height: 28px; padding: 0 8px; border-radius: 10px; background: var(--surface); }
+.review .sw { width: 26px; height: 16px; border-radius: 999px; background: var(--line-strong); position: relative; }
+.review .sw::before { content:""; position:absolute; top:2px; left:2px; width:12px; height:12px; border-radius:50%; background:#fff; }
+.ring { width: 28px; height: 28px; border-radius: 10px; background: var(--surface); display: grid; place-items: center; }
+.ring i { width: 15px; height: 15px; border-radius: 50%; background: conic-gradient(var(--accent) 34%, var(--line-strong) 0); display:block; position:relative; }
+.ring i::after { content:""; position:absolute; inset: 2.5px; border-radius: 50%; background: var(--surface); }
+
+.pipeline { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding: 0 2px 8px; }
+.step { background: var(--surface); border-radius: 10px; padding: 7px 8px; text-align: center; }
+.step .k { font-size: 11px; color: var(--ink-4); }
+.step .m { font-size: 13px; font-weight: 600; color: var(--ink); margin-top: 1px; }
+.step .e { font-size: 11px; color: var(--accent-ink); font-weight: 600; margin-top: 1px; text-transform: lowercase; }
+.step.mid { background: var(--accent-bg); }
+
+.inputrow { display: flex; align-items: center; gap: 8px; }
+.plus { flex: 0 0 auto; width: 40px; height: 40px; border-radius: 10px; border: 0; background: var(--surface); color: var(--ink-3); font-size: 17px; display: grid; place-items: center; }
+.field { flex: 1; min-width: 0; }
+.field textarea { width: 100%; box-sizing: border-box; border: 0; outline: 0; resize: none; border-radius: 12px; padding: 11px 14px; font-size: 15px; line-height: 1.4; color: var(--ink); background: var(--surface); font-family: var(--sans); min-height: 40px; }
+.field textarea::placeholder { color: var(--ink-4); }
+.send { flex: 0 0 auto; width: 40px; height: 40px; border-radius: 50%; border: 0; background: var(--accent); color: #fff; display: grid; place-items: center; }
+.send svg { width: 16px; height: 16px; }
+</style>
+</head>
+<body>
+<div class="frame">
+  <span class="label">B — 선 없는 틴트 블록</span>
+  <div class="topbar">스마트에이전트</div>
+  <div class="msgs">
+    <div class="bubble user">로그인 화면 여백 좀 넓혀줘</div>
+    <div class="bubble agent">네, 상단·하단 여백을 16px씩 늘렸습니다. 확인해 주세요.</div>
+  </div>
+  <div class="composer">
+    <div class="chips">
+      <button class="chip">Claude<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 9l6 6 6-6"/></svg></button>
+      <button class="chip">권한 자동<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 9l6 6 6-6"/></svg></button>
+      <button class="chip">교차 모델<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 9l6 6 6-6"/></svg></button>
+      <div class="spacer"></div>
+      <label class="review"><span>검토</span><span class="sw"></span></label>
+      <div class="ring"><i></i></div>
+    </div>
+    <div class="pipeline">
+      <div class="step"><div class="k">판단</div><div class="m">Haiku 4.5</div></div>
+      <div class="step mid"><div class="k">계획</div><div class="m">Opus 5</div><div class="e">높음</div></div>
+      <div class="step"><div class="k">실행</div><div class="m">Sonnet 5</div><div class="e">기본</div></div>
+    </div>
+    <div class="inputrow">
+      <button class="plus">+</button>
+      <div class="field"><textarea rows="1" placeholder="지시를 입력하세요…"></textarea></div>
+      <button class="send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+    </div>
+  </div>
+</div>
+</body>
+</html>

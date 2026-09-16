@@ -1,5 +1,8 @@
 // Read-only git helpers for the workspace view (branch, recent commits, dirty files).
-import { execFile } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFile, spawn } from 'node:child_process';
 
 function git(cwd, args, timeout = 8000) {
   return new Promise((resolve) => {
@@ -34,6 +37,29 @@ export async function gitSummary(cwd, limit = 20) {
 export async function gitCommitDiff(cwd, hash) {
   const out = await git(cwd, ['show', '--stat', '--format=%H%n%an <%ae>%n%ad%n%n%B', hash], 15000);
   return out || '';
+}
+
+/** Working-tree diff for a cross-provider reviewer: what actually changed, not just which files.
+ * Untracked files show up in `git diff` as nothing, so their names are appended separately. */
+export async function gitDiff(cwd, maxChars = 40_000) {
+  const inside = await git(cwd, ['rev-parse', '--is-inside-work-tree']);
+  if (!inside || !inside.trim().startsWith('true')) return '';
+  const [stat, diff, status] = await Promise.all([
+    git(cwd, ['diff', 'HEAD', '--stat'], 15000),
+    git(cwd, ['diff', 'HEAD'], 15000),
+    git(cwd, ['status', '--porcelain']),
+  ]);
+  const untracked = (status || '')
+    .split('\n')
+    .filter((l) => l.startsWith('??'))
+    .map((l) => l.slice(3));
+  const parts = [];
+  if (stat?.trim()) parts.push(stat.trim());
+  if (diff?.trim()) parts.push(diff.trim());
+  if (untracked.length) parts.push(`추적되지 않는 새 파일:\n${untracked.join('\n')}`);
+  let text = parts.join('\n\n');
+  if (text.length > maxChars) text = `${text.slice(0, maxChars)}\n… (잘림, 나머지는 파일을 직접 읽으세요)`;
+  return text;
 }
 
 /** Parses the remote URL into its parts. Handles https, ssh and scp-style GitHub/GitLab URLs. */
@@ -75,4 +101,94 @@ export async function setGitRemote(cwd, url) {
     : await git(cwd, ['remote', 'add', 'origin', url]);
   if (applied === null) throw new Error('원격 저장소 주소를 저장하지 못했습니다');
   return gitRemote(cwd);
+}
+
+// ---------- turn snapshots (되돌리기) ----------
+// Before and after each agent turn the whole working tree (tracked + untracked, .gitignore
+// respected) is written as a git tree object through a throwaway index, so the project's own
+// index, HEAD and stash stay untouched. Undo is then just the reverse diff between two trees.
+function gitEnv(cwd, args, { env, input, timeout = 30_000, maxBuffer = 64 * 1024 * 1024 } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn('git', args, { cwd, env: { ...process.env, ...(env || {}) }, windowsHide: true });
+    const out = [], err = [];
+    let size = 0;
+    const timer = setTimeout(() => child.kill(), timeout);
+    child.stdout.on('data', (d) => { size += d.length; if (size <= maxBuffer) out.push(d); });
+    child.stderr.on('data', (d) => err.push(d));
+    child.on('error', () => { clearTimeout(timer); resolve({ ok: false, stdout: Buffer.alloc(0), stderr: 'git not found' }); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0, stdout: Buffer.concat(out), stderr: Buffer.concat(err).toString('utf8') });
+    });
+    if (input) child.stdin.end(input); else child.stdin.end();
+  });
+}
+
+export async function gitToplevel(cwd) {
+  const r = await git(cwd, ['rev-parse', '--show-toplevel']);
+  return r ? r.trim() : null;
+}
+
+/** Writes the current working tree as a tree object and returns its hash (null outside a repo). */
+export async function snapshotTree(cwd) {
+  const top = await gitToplevel(cwd);
+  if (!top) return null;
+  const index = path.join(os.tmpdir(), `smartagent-index-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  try {
+    const env = { GIT_INDEX_FILE: index };
+    // Seed from HEAD so file modes/renames resolve the same way as a normal `git add -A`.
+    const head = await gitEnv(top, ['read-tree', 'HEAD'], { env });
+    if (!head.ok) await gitEnv(top, ['read-tree', '--empty'], { env });
+    const add = await gitEnv(top, ['add', '-A', '--', '.'], { env, timeout: 120_000 });
+    if (!add.ok) return null;
+    const tree = await gitEnv(top, ['write-tree'], { env });
+    return tree.ok ? tree.stdout.toString('utf8').trim() : null;
+  } finally {
+    try { fs.unlinkSync(index); } catch {}
+  }
+}
+
+/** Files changed between two tree snapshots (names + a +/- line count). */
+export async function treeChanges(cwd, fromTree, toTree) {
+  const top = await gitToplevel(cwd);
+  if (!top) return { files: [], added: 0, removed: 0 };
+  const r = await gitEnv(top, ['diff', '--numstat', fromTree, toTree]);
+  if (!r.ok) return { files: [], added: 0, removed: 0 };
+  const files = [];
+  let added = 0, removed = 0;
+  for (const line of r.stdout.toString('utf8').split('\n')) {
+    if (!line.trim()) continue;
+    const [a, d, file] = line.split('\t');
+    if (a !== '-') { added += Number(a) || 0; removed += Number(d) || 0; }
+    files.push(file);
+  }
+  return { files, added, removed };
+}
+
+/** Reverts the working tree from `fromTree` back to `toTree` by applying the reverse diff.
+ * Fails (without touching anything) when later edits overlap the same lines. */
+export async function restoreTree(cwd, fromTree, toTree) {
+  const top = await gitToplevel(cwd);
+  if (!top) throw new Error('Git 저장소가 아닙니다');
+  for (const t of [fromTree, toTree]) {
+    const exists = await gitEnv(top, ['cat-file', '-e', `${t}^{tree}`]);
+    if (!exists.ok) throw new Error('되돌릴 기록이 더 이상 남아 있지 않습니다');
+  }
+  const diff = await gitEnv(top, ['diff', '--binary', '--full-index', fromTree, toTree], { timeout: 60_000 });
+  if (!diff.ok) throw new Error('변경 내용을 읽지 못했습니다');
+  if (!diff.stdout.length) return { files: 0 };
+  const check = await gitEnv(top, ['apply', '--check', '--whitespace=nowarn', '-'], { input: diff.stdout, timeout: 60_000 });
+  if (!check.ok) {
+    const err = new Error('그 뒤에 같은 부분이 또 바뀌어 자동으로 되돌리지 못했습니다');
+    err.detail = check.stderr.slice(0, 600);
+    throw err;
+  }
+  const apply = await gitEnv(top, ['apply', '--whitespace=nowarn', '-'], { input: diff.stdout, timeout: 60_000 });
+  if (!apply.ok) {
+    const err = new Error('되돌리는 중 문제가 생겼습니다');
+    err.detail = apply.stderr.slice(0, 600);
+    throw err;
+  }
+  const changes = await treeChanges(top, fromTree, toTree);
+  return { files: changes.files.length };
 }

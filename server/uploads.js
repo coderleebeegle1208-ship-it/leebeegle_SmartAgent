@@ -97,6 +97,15 @@ async function makeImageView(inPath, outPath) {
   }
 }
 
+/** How many scene frames a video of this length gets. Short clips get one frame per second (kept
+ * exact, since it's already few); longer ones taper off instead of always maxing out at 8 — each
+ * frame rides in the conversation history for the rest of the chat, so it's a recurring cost. */
+export function videoFrameCount(duration) {
+  if (!(duration > 0)) return 8;
+  if (duration <= 8) return Math.max(1, Math.round(duration));
+  return Math.min(8, Math.max(4, Math.ceil(duration / 10)));
+}
+
 async function extractFrames(inPath, dir, id, count, duration) {
   const ffmpeg = findFfmpeg();
   if (!ffmpeg) return [];
@@ -107,7 +116,7 @@ async function extractFrames(inPath, dir, id, count, duration) {
     const name = `${id}-f${i}.jpg`;
     const out = path.join(dir, name);
     try {
-      await execFileP(ffmpeg, ['-y', '-ss', t.toFixed(2), '-i', inPath, '-frames:v', '1', '-vf', 'scale=800:-2', out], { timeout: 20_000 });
+      await execFileP(ffmpeg, ['-y', '-ss', t.toFixed(2), '-i', inPath, '-frames:v', '1', '-vf', 'scale=640:-2', out], { timeout: 20_000 });
       if (fs.existsSync(out)) names.push(name);
     } catch {}
   }
@@ -144,7 +153,7 @@ export async function saveUpload({ agentId, name, mime, buffer }) {
       descriptor.duration = probe.duration;
       descriptor.width = probe.width;
       descriptor.height = probe.height;
-      const frameCount = probe.duration > 0 && probe.duration <= 8 ? Math.max(1, Math.round(probe.duration)) : 8;
+      const frameCount = videoFrameCount(probe.duration);
       const frames = await extractFrames(path.join(dir, fileName), dir, id, frameCount, probe.duration || frameCount);
       if (frames.length) {
         descriptor.frames = frames.map((f) => `agent-${agentId}/${f}`);
@@ -167,11 +176,6 @@ export function loadUpload(agentId, id) {
   } catch {
     return null;
   }
-}
-
-/** Whether this agent has ever received an upload — gates giving Claude read access to the folder. */
-export function hasUploads(agentId) {
-  try { return fs.existsSync(path.join(UPLOAD_DIR, `agent-${agentId}`)); } catch { return false; }
 }
 
 const URL_RE = /https?:\/\/[^\s<>"'」)]+/g;

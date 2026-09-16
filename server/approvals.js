@@ -7,6 +7,20 @@ import { planPhase } from './state.js';
 
 const pending = new Map(); // approvalId -> { promise, resolve }
 const results = new Map(); // approvalId -> result (kept briefly for re-polls)
+// "이번 작업 동안 모두 허용": agents whose remaining tool requests are allowed without asking,
+// until the current run settles (cleared by the runner) or the owner switches it off.
+const blanket = new Map(); // agentId -> { since, count }
+
+export function setBlanketAllow(agentId, on) {
+  const was = blanket.has(agentId);
+  if (on) { if (!was) blanket.set(agentId, { since: Date.now(), count: 0 }); }
+  else blanket.delete(agentId);
+  if (was !== blanket.has(agentId)) emit('blanket.changed', { agent_id: agentId, on: !!on });
+  return blanket.has(agentId);
+}
+export function blanketAllow(agentId) {
+  return blanket.get(agentId) || null;
+}
 
 export function summarizeInput(toolName, input) {
   if (!input || typeof input !== 'object') return '';
@@ -46,6 +60,15 @@ export function requestApproval(agentId, toolName, input) {
   }
 
   const approval = Approvals.create(agentId, toolName, input);
+  // Questions still need a human even under blanket approval; everything else sails through.
+  const auto = toolName !== 'AskUserQuestion' ? blanket.get(agentId) : null;
+  if (auto) {
+    auto.count += 1;
+    Approvals.resolve(approval.id, 'allowed', 'blanket');
+    const m = Messages.add(agentId, 'system', `자동 허용 · ${toolName}: ${summarizeInput(toolName, input)}`, { approval_id: approval.id });
+    emit('message', { agent_id: agentId, message: m });
+    return { approval, promise: Promise.resolve({ behavior: 'allow', updatedInput: input }) };
+  }
   let resolve;
   const promise = new Promise((r) => (resolve = r));
   pending.set(approval.id, { promise, resolve });
@@ -74,6 +97,14 @@ export function resolveApproval(id, decision, extra = {}) {
   if (!approval || approval.status !== 'pending') return null;
   const status = decision === 'allow' ? 'allowed' : 'denied';
   const updated = Approvals.resolve(id, status, extra.message || null);
+  // scope 'run': this one plus every other pending request, and everything else this run asks for.
+  if (decision === 'allow' && extra.scope === 'run') {
+    setBlanketAllow(approval.agent_id, true);
+    for (const other of Approvals.pendingForAgent(approval.agent_id)) {
+      if (other.id === id || other.tool_name === 'AskUserQuestion') continue;
+      resolveApproval(other.id, 'allow');
+    }
+  }
 
   const input = JSON.parse(approval.input_json);
   let result;
@@ -90,7 +121,9 @@ export function resolveApproval(id, decision, extra = {}) {
   Messages.add(
     approval.agent_id,
     'system',
-    decision === 'allow' ? `승인함 · ${approval.tool_name}` : `거부함 · ${approval.tool_name}${extra.message ? ` (${extra.message})` : ''}`,
+    decision === 'allow'
+      ? `승인함 · ${approval.tool_name}${extra.scope === 'run' ? ' · 이번 작업의 남은 요청도 모두 허용' : ''}`
+      : `거부함 · ${approval.tool_name}${extra.message ? ` (${extra.message})` : ''}`,
     { approval_id: id }
   );
   emit('approval.resolved', { approval: updated, agent });

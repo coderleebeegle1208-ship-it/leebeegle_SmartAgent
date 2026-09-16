@@ -63,6 +63,7 @@ const CAPTURE_TOOL = {
       height: { type: 'number', description: 'Viewport height in px (default 844)' },
       full_page: { type: 'boolean', description: 'Use a tall viewport (2400px) to show more of the page' },
       wait_ms: { type: 'number', description: 'Extra render time before the shot (default 1500)' },
+      fit_width_px: { type: 'number', description: "Use when the target's natural CSS width (e.g. a print poster laid out at 1600px) is wider than `width`. The page is scaled down to fit so the whole thing shows instead of being cropped to its left edge. Set this to the target's actual CSS pixel width." },
     },
   },
 };

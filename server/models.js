@@ -34,12 +34,38 @@ export function stageOptions(stage) {
 
 export const MODEL_CATALOG = Object.fromEntries(Object.keys(STAGE_FAMILIES).map((s) => [s, stageOptions(s)]));
 
+// Codex is intentionally a single-model flow. These are the current non-deprecated
+// choices advertised by the installed Codex client and official Codex model guide.
+export const CODEX_MODEL_CATALOG = [
+  { value: 'gpt-6-astra', label: 'Astra' },
+  { value: 'gpt-5.6-sol', label: '5.6 Sol' },
+  { value: 'gpt-5.6-terra', label: '5.6 Terra' },
+  { value: 'gpt-5.6-luna', label: '5.6 Luna' },
+  { value: 'gpt-5.5', label: '5.5' },
+];
+
+export function isCodexModelAllowed(value) {
+  return CODEX_MODEL_CATALOG.some((o) => o.value === value);
+}
+
+export function codexModelLabel(value) {
+  return CODEX_MODEL_CATALOG.find((o) => o.value === value)?.label || value || '기본 모델';
+}
+
+/** App-owned defaults deliberately override a potentially expensive desktop setting.
+ * Terra + medium is the balanced everyday path; harder work can still opt into Sol/high. */
+export function codexDefaults() {
+  return { model: 'gpt-5.6-terra', effort: 'medium' };
+}
+
 export function isModelAllowed(stage, value) {
   return (MODEL_CATALOG[stage] || []).some((o) => o.value === value);
 }
 
 /** Human label for an alias, an explicit id, or a raw id reported back by the CLI. */
 export function modelLabel(value) {
+  const codex = CODEX_MODEL_CATALOG.find((o) => o.value === value);
+  if (codex) return codex.label;
   if (!value) return '기본 모델';
   for (const f of MODEL_FAMILIES) {
     if (f.alias === value) return `${f.name} 최신`;

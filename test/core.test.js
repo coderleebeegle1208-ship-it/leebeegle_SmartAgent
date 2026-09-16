@@ -3,19 +3,28 @@ import test from 'node:test';
 
 process.env.AGENT_REMOTE_DB = ':memory:';
 process.env.CODEX_BIN = process.execPath;
+const fs = (await import('node:fs')).default;
+const path = (await import('node:path')).default;
+const os = (await import('node:os')).default;
+process.env.AGENT_REMOTE_CONFIG = path.join(os.tmpdir(), `agent-remote-test-config-${process.pid}.json`);
 
 const { AgentSessions, Agents, Messages, Workspaces } = await import('../server/db.js');
-const { buildClaudeArgs } = await import('../server/runners/claude.js');
-const { buildCodexArgs } = await import('../server/runners/codex.js');
-const { isUsageLimitError, stageEfforts, switchProvider } = await import('../server/runners/index.js');
+const { buildClaudeArgs, claudeStdinText } = await import('../server/runners/claude.js');
+const { CODEX_EFFICIENCY_CONFIG, buildCodexArgs, codexApproverConfig, codexApproverEnv, codexStyledText } = await import('../server/runners/codex.js');
+const { clipForTriage, claudeAddDirs, failoverContinuation, isUsageLimitError, stageEfforts, switchProvider } = await import('../server/runners/index.js');
 const { buildReviewPrompt, buildRevisionPrompt, compactConversation, formatGitManifest, otherProvider } = await import('../server/collaboration.js');
-const { parseUsage } = await import('../server/usage.js');
-const { PHONE_STYLE_PROMPT, PHONE_STYLE_REMINDER, withPhoneReminder, withPhoneStyle } = await import('../server/style.js');
+const { parseUsage, parseCodexRateLimits } = await import('../server/usage.js');
+const { PHONE_STYLE_PROMPT, PHONE_STYLE_REMINDER, PHONE_STYLE_REMINDER_SHORT, withPhoneReminder, withPhoneReminderShort, withPhoneStyle } = await import('../server/style.js');
 const { MIN_CAPTURE_WIDTH, resolveTarget } = await import('../server/capture.js');
-const { MODEL_CATALOG, isModelAllowed, modelLabel } = await import('../server/models.js');
+const { CODEX_MODEL_CATALOG, MODEL_CATALOG, codexDefaults, codexModelLabel, isCodexModelAllowed, isModelAllowed, modelLabel } = await import('../server/models.js');
 const { isValidRemoteUrl, parseRemote } = await import('../server/git.js');
-const { estimateCost, normalizeClaudeUsage, normalizeCodexUsage, summarizeRun } = await import('../server/tokens.js');
-const { UPLOAD_DIR, attachmentBlock, extractLinks, loadUpload } = await import('../server/uploads.js');
+const { estimateCost, normalizeClaudeUsage, normalizeCodexUsage, summarizeRun, usageHeadline } = await import('../server/tokens.js');
+const { UPLOAD_DIR, attachmentBlock, extractLinks, loadUpload, videoFrameCount } = await import('../server/uploads.js');
+const { loadConfig } = await import('../server/config.js');
+const {
+  copySkill, deleteSkill, expandSkill, listImportableSkills, listSkills, parseFrontmatter, resolveSkillCommand,
+  skillCatalogBlock, skillPointerBlock, triageTextFor, validateSkillName, writeSkill,
+} = await import('../server/skills.js');
 
 test('Codex resume options stay before the resume subcommand', () => {
   const args = buildCodexArgs(
@@ -24,12 +33,59 @@ test('Codex resume options stay before the resume subcommand', () => {
     { path: 'C:\\project' },
     '계속 진행',
   );
-  assert.deepEqual(args, [
-    'codex.js', 'exec', '--json', '--skip-git-repo-check', '-C', 'C:\\project',
+  assert.deepEqual(args.slice(args.indexOf('exec')), [
+    'exec', '--ignore-user-config', '--json', '--skip-git-repo-check', '-C', 'C:\\project',
     '--sandbox', 'read-only', 'resume', 'thread-123', '계속 진행',
   ]);
   assert.ok(args.indexOf('-C') < args.indexOf('resume'));
   assert.ok(args.indexOf('--sandbox') < args.indexOf('resume'));
+});
+
+test('buildClaudeArgs resumes an existing Claude session and omits --resume otherwise', () => {
+  const withSession = buildClaudeArgs({ session_id: 'claude-session-1' }, 'mcp.json', {});
+  const at = withSession.indexOf('--resume');
+  assert.ok(at !== -1);
+  assert.equal(withSession[at + 1], 'claude-session-1');
+
+  const withoutSession = buildClaudeArgs({ session_id: null }, 'mcp.json', {});
+  assert.equal(withoutSession.indexOf('--resume'), -1);
+});
+
+test('Codex model and reasoning choice are passed to the CLI', () => {
+  const args = buildCodexArgs(
+    { pre: ['codex.js'] },
+    { permission_mode: 'acceptEdits', session_id: null, model: 'gpt-5.6-terra', effort: 'high' },
+    { path: 'C:\\project' },
+    '작업',
+  );
+  const execAt = args.indexOf('exec');
+  assert.ok(execAt > 0);
+  assert.ok(args.slice(0, execAt).includes('model_reasoning_effort="high"'));
+  assert.equal(args[args.indexOf('-m') + 1], 'gpt-5.6-terra');
+});
+
+test('Codex always gets bounded context, tool output, and concise response settings', () => {
+  const args = buildCodexArgs(
+    { pre: [] },
+    { permission_mode: 'acceptEdits', session_id: 'thread-1', model: 'gpt-5.6-terra', effort: 'medium' },
+    { path: 'C:\\project' },
+    '계속',
+  );
+  for (const setting of CODEX_EFFICIENCY_CONFIG) assert.ok(args.includes(setting), setting);
+  assert.ok(args.includes('memories.use_memories=false'));
+  assert.ok(args.includes('--ignore-user-config'));
+  assert.ok(args.indexOf('model_auto_compact_token_limit=100000') < args.indexOf('exec'));
+  assert.ok(args.indexOf('tool_output_token_limit=4000') < args.indexOf('resume'));
+});
+
+test('Codex gets only the safe dashboard tools without leaking the internal token into arguments', () => {
+  const cfg = { port: 3000, internalToken: 'secret-value' };
+  const settings = codexApproverConfig(cfg);
+  assert.ok(settings.some((s) => s.includes('enabled_tools=["capture","restart_server"]')));
+  assert.ok(settings.every((s) => !s.includes(cfg.internalToken)));
+  const env = codexApproverEnv({ id: 7 }, cfg);
+  assert.equal(env.APPROVER_AGENT_ID, '7');
+  assert.equal(env.APPROVER_TOKEN, cfg.internalToken);
 });
 
 test('Claude reviewer is restricted to read-only inspection tools', () => {
@@ -41,6 +97,25 @@ test('Claude reviewer is restricted to read-only inspection tools', () => {
   assert.ok(args.includes('dontAsk'));
   assert.deepEqual(args.slice(args.indexOf('--tools') + 1, args.indexOf('--permission-mode')), ['Read', 'Glob', 'Grep']);
   assert.deepEqual(args.slice(args.indexOf('--disallowedTools') + 1, args.indexOf('--model')), ['Write', 'Edit', 'NotebookEdit', 'Bash']);
+});
+
+test('failoverContinuation carries the plan along instead of dropping it on provider switch', () => {
+  const withoutPlan = failoverContinuation('버그 고쳐줘', null);
+  assert.match(withoutPlan, /버그 고쳐줘/);
+  assert.doesNotMatch(withoutPlan, /\[계획\]/);
+
+  const withPlan = failoverContinuation('버그 고쳐줘', '- 1단계: 원인 파악\n- 2단계: 수정');
+  assert.match(withPlan, /버그 고쳐줘/);
+  assert.match(withPlan, /\[계획\]\n- 1단계: 원인 파악/);
+});
+
+test('videoFrameCount tapers off for longer videos instead of always maxing out', () => {
+  assert.equal(videoFrameCount(0), 8); // unknown duration: keep the old safe default
+  assert.equal(videoFrameCount(5), 5);
+  assert.equal(videoFrameCount(8), 8);
+  assert.equal(videoFrameCount(15), 4);
+  assert.equal(videoFrameCount(60), 6);
+  assert.equal(videoFrameCount(600), 8);
 });
 
 test('usage-limit classifier only accepts quota-style failures', () => {
@@ -92,6 +167,24 @@ test('Claude usage parser keeps session, weekly, and Fable-specific limits', () 
   ]);
 });
 
+test('Codex rate limits expose the five-hour and weekly windows', () => {
+  const usage = parseCodexRateLimits({
+    rateLimitsByLimitId: {
+      codex: {
+        planType: 'plus',
+        primary: { usedPercent: 24, windowDurationMins: 300, resetsAt: 2_000_000_000 },
+        secondary: { usedPercent: 61, windowDurationMins: 10080, resetsAt: 2_000_100_000 },
+      },
+    },
+  });
+  assert.equal(usage.ok, true);
+  assert.equal(usage.provider, 'codex');
+  assert.deepEqual(usage.items.map(({ label, pct }) => ({ label, pct })), [
+    { label: '5시간 한도', pct: 24 },
+    { label: '주간 한도', pct: 61 },
+  ]);
+});
+
 test('collaboration direction is symmetric', () => {
   assert.equal(otherProvider('claude'), 'codex');
   assert.equal(otherProvider('codex'), 'claude');
@@ -113,18 +206,32 @@ test('review and revision prompts preserve roles and privacy-minimized Git conte
   const gitManifest = formatGitManifest({ isRepo: true, branch: 'main', changes: [{ code: 'M', file: 'src/app.js' }] });
   const review = buildReviewPrompt({
     originalText: '기능을 구현해', implementationText: '구현 완료', recentContext: '사용자: 기능을 구현해', gitManifest,
+    diff: '+added line\n-removed line', plan: '- 계획 1단계',
     implementer: 'claude', reviewer: 'codex',
   });
   assert.match(review, /Codex 교차 리뷰어/);
   assert.match(review, /파일을 수정하지 마세요/);
-  assert.match(review, /M src\/app\.js/);
+  assert.match(review, /<diff>[\s\S]*added line[\s\S]*<\/diff>/);
+  assert.match(review, /<plan>[\s\S]*계획 1단계[\s\S]*<\/plan>/);
+  assert.match(review, /diff가 이번 변경 사항을 그대로/);
+  // diff --stat already names every changed file, so the manifest is dropped to avoid a duplicate file list.
+  assert.doesNotMatch(review, /M src\/app\.js/);
+  assert.doesNotMatch(review, /git_manifest/);
+
+  const reviewWithoutDiff = buildReviewPrompt({
+    originalText: '기능을 구현해', implementationText: '구현 완료', recentContext: '사용자: 기능을 구현해', gitManifest,
+    diff: '', plan: '- 계획 1단계',
+    implementer: 'claude', reviewer: 'codex',
+  });
+  assert.match(reviewWithoutDiff, /M src\/app\.js/);
 
   const revision = buildRevisionPrompt({
-    originalText: '기능을 구현해', reviewText: '검토 결과', gitManifest,
+    originalText: '기능을 구현해', reviewText: '검토 결과',
     implementer: 'codex', reviewer: 'claude',
   });
   assert.match(revision, /최초 구현자인 Codex/);
   assert.match(revision, /Claude의 교차 리뷰/);
+  assert.doesNotMatch(revision, /git_manifest/);
 });
 
 test('phone-friendly answer style reaches both providers', () => {
@@ -134,6 +241,24 @@ test('phone-friendly answer style reaches both providers', () => {
   assert.ok(withPhoneStyle('계속 진행').endsWith('\n\n---\n\n계속 진행'));
   assert.ok(withPhoneStyle('계속 진행').startsWith(PHONE_STYLE_PROMPT));
   assert.equal(withPhoneReminder('계속 진행'), `계속 진행\n\n${PHONE_STYLE_REMINDER}`);
+  assert.equal(withPhoneReminderShort('계속 진행'), `계속 진행\n\n${PHONE_STYLE_REMINDER_SHORT}`);
+  assert.ok(PHONE_STYLE_REMINDER_SHORT.length < PHONE_STYLE_REMINDER.length / 2);
+});
+
+test('phone tone reminder/guide only reaches turns the owner actually reads', () => {
+  // Claude: the same turn's --append-system-prompt already carries the full guide, so the stdin
+  // reminder only needs the short form that points back at it (except on plan/review turns, which
+  // get neither since their output isn't read by the owner).
+  assert.equal(claudeStdinText('계속 진행', {}), withPhoneReminderShort('계속 진행'));
+  assert.equal(claudeStdinText('계획 세워', { stage: 'plan' }), '계획 세워');
+  assert.equal(claudeStdinText('검토해', { phase: 'review' }), '검토해');
+  assert.equal(claudeStdinText('실행해', { stage: 'exec' }), withPhoneReminderShort('실행해'));
+
+  // Codex: no system-prompt flag, so the guide (or its reminder) rides in the instruction text itself.
+  assert.equal(codexStyledText('시작', { session_id: null }, {}), withPhoneStyle('시작'));
+  assert.equal(codexStyledText('계속', { session_id: 'thread-1' }, {}), withPhoneReminder('계속'));
+  assert.equal(codexStyledText('검토해', { session_id: null }, { phase: 'review' }), '검토해');
+  assert.equal(codexStyledText('검토해', { session_id: 'thread-1' }, { phase: 'review' }), '검토해');
 });
 
 test('model catalog offers latest aliases plus pinned versions per stage', () => {
@@ -147,6 +272,15 @@ test('model catalog offers latest aliases plus pinned versions per stage', () =>
   assert.equal(modelLabel('claude-fable-5-1'), 'Fable 5.1');
   assert.equal(modelLabel('claude-haiku-4-5-20251001'), 'Haiku 4.5');
   assert.equal(modelLabel('sonnet'), 'Sonnet 최신');
+});
+
+test('Codex model catalog is a single-model picker with current choices', () => {
+  assert.ok(isCodexModelAllowed('gpt-6-astra'));
+  assert.ok(isCodexModelAllowed('gpt-5.6-sol'));
+  assert.ok(!isCodexModelAllowed('gpt-5.2'));
+  assert.equal(CODEX_MODEL_CATALOG[1].label, '5.6 Sol');
+  assert.equal(codexModelLabel('gpt-5.6-terra'), '5.6 Terra');
+  assert.deepEqual(codexDefaults(), { model: 'gpt-5.6-terra', effort: 'medium' });
 });
 
 test('git remote URLs are parsed for display and validated before reaching git', () => {
@@ -188,6 +322,15 @@ test('WebFetch is pre-allowed and attachment folders get --add-dir', () => {
   const i = args.indexOf('--add-dir');
   assert.ok(i > -1);
   assert.equal(args[i + 1], 'C:\\data\\uploads\\agent-1');
+});
+
+test('claudeAddDirs always includes the agent upload folder, even with no uploads yet', () => {
+  const dirs = claudeAddDirs('add-dirs-test-agent');
+  assert.equal(dirs.length, 1);
+  assert.ok(dirs[0].endsWith(path.join('uploads', 'agent-add-dirs-test-agent')));
+  assert.ok(fs.existsSync(dirs[0]));
+  const withExtra = claudeAddDirs('add-dirs-test-agent', ['C:\\extra\\dir']);
+  assert.deepEqual(withExtra, ['C:\\extra\\dir', dirs[0]]);
 });
 
 test('Codex image attachments are passed as -i flags before resume', () => {
@@ -281,6 +424,47 @@ test('summarizeRun rolls up stages and compares against a single-model baseline'
   assert.equal(manual.savedPct, null);
 });
 
+test('usageHeadline separates fresh tokens, cache writes, and cache reads', () => {
+  const withCacheWrite = summarizeRun(
+    [{ stage: 'exec', provider: 'claude', model: 'claude-sonnet-5', input: 1000, output: 200, cacheRead: 5000, cacheWrite: 3000, cost: null }],
+    null,
+  );
+  const headline = usageHeadline(withCacheWrite);
+  assert.match(headline, /새 토큰 1\.2k/); // input + output only, cache write excluded
+  assert.match(headline, /캐시 저장 3k/);
+  assert.match(headline, /다시 읽기 5k/);
+
+  const noCacheWrite = summarizeRun(
+    [{ stage: 'exec', provider: 'claude', model: 'claude-sonnet-5', input: 1000, output: 200, cacheRead: 0, cacheWrite: 0, cost: null }],
+    null,
+  );
+  assert.doesNotMatch(usageHeadline(noCacheWrite), /캐시 저장/);
+});
+
+test('recentByRole counts only matching-role messages toward the limit, unlike forAgent', () => {
+  const workspace = Workspaces.create('recent-by-role-test', process.cwd() + '/recent-by-role-fixture');
+  const agent = Agents.create(workspace.id, 'claude', 'recent-by-role agent');
+  Messages.add(agent.id, 'user', '요청 1');
+  for (let i = 0; i < 5; i += 1) Messages.add(agent.id, 'tool', `도구 호출 ${i}`);
+  Messages.add(agent.id, 'assistant', '응답 1');
+
+  const onlyConvo = Messages.recentByRole(agent.id, ['user', 'assistant', 'plan', 'handoff'], 2);
+  assert.deepEqual(onlyConvo.map((m) => m.content), ['요청 1', '응답 1']);
+
+  const mixedLastTwo = Messages.forAgent(agent.id, 2);
+  assert.ok(mixedLastTwo.every((m) => m.role === 'tool' || m.role === 'assistant'));
+});
+
+test('clipForTriage keeps short requests intact and trims long ones from the middle', () => {
+  assert.equal(clipForTriage('짧은 요청'), '짧은 요청');
+  const long = 'a'.repeat(5000);
+  const clipped = clipForTriage(long, 3000);
+  assert.ok(clipped.length < long.length);
+  assert.match(clipped, /… \(중략\) …/);
+  assert.ok(clipped.startsWith('a'));
+  assert.ok(clipped.endsWith('a'));
+});
+
 test('agent token usage rolls up per day and lifetime from stored usage messages', () => {
   const workspace = Workspaces.create('usage-test', process.cwd() + '/usage-test-fixture');
   const agent = Agents.create(workspace.id, 'claude', 'usage agent');
@@ -294,4 +478,434 @@ test('agent token usage rolls up per day and lifetime from stored usage messages
   assert.equal(rollup.all.runs, 1);
   assert.equal(rollup.today.tokens, 1200);
   assert.ok(rollup.today.cost > 0);
+});
+
+test('usageSummary rolls up "fresh" (new tokens + cache writes) and cache reads separately', () => {
+  const workspace = Workspaces.create('usage-fresh-test', process.cwd() + '/usage-fresh-fixture');
+  const agent = Agents.create(workspace.id, 'claude', 'usage fresh agent');
+  const run1 = summarizeRun(
+    [{ stage: 'exec', provider: 'claude', model: 'claude-sonnet-5', input: 1000, output: 200, cacheRead: 500, cacheWrite: 300, cost: null }],
+    null,
+  );
+  const run2 = summarizeRun(
+    [{ stage: 'exec', provider: 'claude', model: 'claude-sonnet-5', input: 2000, output: 400, cacheRead: 1500, cacheWrite: 0, cost: null }],
+    null,
+  );
+  Messages.add(agent.id, 'usage', 'headline', run1);
+  Messages.add(agent.id, 'usage', 'headline', run2);
+  const rollup = Messages.usageSummary(agent.id);
+  assert.equal(rollup.today.runs, 2);
+  assert.equal(rollup.today.fresh, (1000 + 200 + 300) + (2000 + 400 + 0));
+  assert.equal(rollup.today.cache_read, 500 + 1500);
+});
+
+test('plan and review turns skip global MCP config/skills and get a spend cap; normal turns only skip global MCP config', () => {
+  const base = { permission_mode: 'ask', session_id: null, model: null, effort: null };
+  const planArgs = buildClaudeArgs(base, 'agent.json', { stage: 'plan', budgetUsd: 2 });
+  assert.ok(planArgs.includes('--strict-mcp-config'));
+  assert.ok(planArgs.includes('--disable-slash-commands'));
+  assert.deepEqual(planArgs.slice(planArgs.indexOf('--max-budget-usd')), ['--max-budget-usd', '2']);
+
+  const reviewArgs = buildClaudeArgs(base, 'agent.json', { phase: 'review' });
+  assert.ok(reviewArgs.includes('--disable-slash-commands'));
+  assert.ok(!reviewArgs.includes('--max-budget-usd')); // no budgetUsd passed
+
+  const execArgs = buildClaudeArgs(base, 'agent.json', { stage: 'exec' });
+  assert.ok(execArgs.includes('--strict-mcp-config'));
+  assert.ok(!execArgs.includes('--disable-slash-commands'));
+  assert.ok(!execArgs.includes('--max-budget-usd'));
+});
+
+test('the phone-tone system prompt only rides on turns the owner reads, not plan/review turns', () => {
+  const base = { permission_mode: 'ask', session_id: null, model: null, effort: null };
+  assert.ok(!buildClaudeArgs(base, 'agent.json', { stage: 'plan' }).includes('--append-system-prompt'));
+  assert.ok(!buildClaudeArgs(base, 'agent.json', { phase: 'review' }).includes('--append-system-prompt'));
+  const execArgs = buildClaudeArgs(base, 'agent.json', { stage: 'exec' });
+  assert.equal(execArgs[execArgs.indexOf('--append-system-prompt') + 1], PHONE_STYLE_PROMPT);
+  const manualArgs = buildClaudeArgs(base, 'agent.json', {});
+  assert.equal(manualArgs[manualArgs.indexOf('--append-system-prompt') + 1], PHONE_STYLE_PROMPT);
+});
+
+test('compactAfterTokens migration tightens old installs to 50k, respects 0 (off), and leaves a lower custom value alone', () => {
+  const configPath = process.env.AGENT_REMOTE_CONFIG;
+  const write = (fields) => fs.writeFileSync(configPath, JSON.stringify(fields));
+
+  write({ tokenOptimizationVersion: 1, compactAfterTokens: 100_000 });
+  assert.equal(loadConfig().compactAfterTokens, 50_000);
+
+  write({ tokenOptimizationVersion: 1, compactAfterTokens: 0 });
+  assert.equal(loadConfig().compactAfterTokens, 0);
+
+  write({ tokenOptimizationVersion: 1, compactAfterTokens: 30_000 });
+  assert.equal(loadConfig().compactAfterTokens, 30_000);
+
+  fs.rmSync(configPath, { force: true });
+  const fresh = loadConfig();
+  assert.equal(fresh.compactAfterTokens, 50_000);
+  assert.equal(fresh.tokenOptimizationVersion, 2);
+  assert.equal(fresh.planBudgetUsd, 0);
+
+  fs.rmSync(configPath, { force: true });
+});
+
+// ---------- skills (/이름 slash commands) ----------
+function mkSkillWorkspace() {
+  const wsPath = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-remote-ws-'));
+  const userDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-remote-user-'));
+  process.env.CLAUDE_CONFIG_DIR = userDir;
+  return { wsPath, userDir };
+}
+function writeSkillFile(dir, name, frontmatter, body) {
+  const skillDir = path.join(dir, name);
+  fs.mkdirSync(skillDir, { recursive: true });
+  fs.writeFileSync(path.join(skillDir, 'SKILL.md'), `${frontmatter}\n\n${body}`);
+  return skillDir;
+}
+
+test('parseFrontmatter reads quoted/unquoted values, strips BOM+CRLF, and falls back with no frontmatter', () => {
+  const withQuotes = parseFrontmatter('---\r\nname: "my-skill"\r\ndescription: \'quoted desc\'\r\nargument-hint: <text>\r\n---\r\nBody text\r\nmore.');
+  assert.equal(withQuotes.fields.name, 'my-skill');
+  assert.equal(withQuotes.fields.description, 'quoted desc');
+  assert.equal(withQuotes.fields['argument-hint'], '<text>');
+  assert.equal(withQuotes.body, 'Body text\nmore.');
+
+  const bom = parseFrontmatter('\uFEFF---\nname: bommed\n---\nhello');
+  assert.equal(bom.fields.name, 'bommed');
+  assert.equal(bom.body, 'hello');
+
+  const missing = parseFrontmatter('no frontmatter here');
+  assert.deepEqual(missing.fields, {});
+  assert.equal(missing.body, 'no frontmatter here');
+});
+
+test('listSkills prefers project scope over user scope and skips non-invocable/malformed entries', () => {
+  const { wsPath, userDir } = mkSkillWorkspace();
+  try {
+    const userSkills = path.join(userDir, 'skills');
+    const projectSkills = path.join(wsPath, '.claude', 'skills');
+    writeSkillFile(userSkills, 'shared', '---\nname: shared\ndescription: user version\n---', 'user body');
+    writeSkillFile(projectSkills, 'shared', '---\nname: shared\ndescription: project version\n---', 'project body');
+    writeSkillFile(userSkills, 'hidden', '---\nname: hidden\ndescription: nope\nuser-invocable: false\n---', 'x');
+    fs.mkdirSync(path.join(userSkills, 'empty-folder'), { recursive: true }); // no SKILL.md
+    writeSkillFile(userSkills, 'solo', '---\ndescription: no explicit name\n---', 'y'); // name falls back to folder
+
+    const list = listSkills(wsPath);
+    const names = list.map((s) => s.name).sort();
+    assert.deepEqual(names, ['shared', 'solo']);
+    assert.equal(list.find((s) => s.name === 'shared').scope, 'project');
+    assert.equal(list.find((s) => s.name === 'shared').description, 'project version');
+  } finally {
+    fs.rmSync(wsPath, { recursive: true, force: true });
+    fs.rmSync(userDir, { recursive: true, force: true });
+    delete process.env.CLAUDE_CONFIG_DIR;
+  }
+});
+
+test('resolveSkillCommand matches a leading /이름 case-insensitively and ignores everything else', () => {
+  const skills = [{ name: 'release-checklist', description: '' }];
+  const hit = resolveSkillCommand('/release-checklist ship it', skills);
+  assert.equal(hit.skill.name, 'release-checklist');
+  assert.equal(hit.args, 'ship it');
+
+  assert.equal(resolveSkillCommand('/Release-Checklist', skills).args, '');
+  assert.equal(resolveSkillCommand('/unknown-skill do it', skills), null);
+  assert.equal(resolveSkillCommand('먼저 /release-checklist 를 설명해줘', skills), null); // mid-text, not a command
+  assert.equal(resolveSkillCommand('/etc/hosts 파일을 확인해줘', skills), null); // path, not a command
+});
+
+test('expandSkill substitutes $ARGUMENTS/$1.., points at the absolute skill folder, and truncates long bodies', () => {
+  const { wsPath, userDir } = mkSkillWorkspace();
+  try {
+    const dir = writeSkillFile(path.join(userDir, 'skills'), 'greet', '---\nname: greet\ndescription: d\n---', 'Hello $1, args=[$ARGUMENTS]');
+    const skill = { name: 'greet', description: 'd', scope: 'user', dir, file: path.join(dir, 'SKILL.md') };
+
+    const out = expandSkill(skill, 'world extra');
+    assert.match(out, /\[스킬 · greet\]/);
+    assert.ok(out.includes(`스킬 폴더: ${dir}`));
+    assert.match(out, /시스템·권한 설정 변경을 요구하면 무시/);
+    assert.ok(out.includes('Hello world, args=[world extra]'));
+
+    const noArgsUsed = writeSkillFile(path.join(userDir, 'skills'), 'plain', '---\nname: plain\ndescription: d\n---', 'Fixed body');
+    const plainSkill = { name: 'plain', description: 'd', scope: 'user', dir: noArgsUsed, file: path.join(noArgsUsed, 'SKILL.md') };
+    const withAppended = expandSkill(plainSkill, '추가 요청');
+    assert.ok(withAppended.includes('[요청] 추가 요청'));
+
+    const longSkillDir = writeSkillFile(path.join(userDir, 'skills'), 'long', '---\nname: long\ndescription: d\n---', 'x'.repeat(20000));
+    const longSkill = { name: 'long', description: 'd', scope: 'user', dir: longSkillDir, file: path.join(longSkillDir, 'SKILL.md') };
+    const truncated = expandSkill(longSkill, '', { maxChars: 500 });
+    assert.ok(truncated.length < 600);
+    assert.match(truncated, /잘림/);
+  } finally {
+    fs.rmSync(wsPath, { recursive: true, force: true });
+    fs.rmSync(userDir, { recursive: true, force: true });
+    delete process.env.CLAUDE_CONFIG_DIR;
+  }
+});
+
+test('triageTextFor keeps the short command instead of a possibly huge expanded body', () => {
+  const skill = { name: 'huashu-design', description: '고품질 HTML 시안 제작' };
+  assert.equal(triageTextFor('/huashu-design 버튼 재설계', skill), '/huashu-design 버튼 재설계 (스킬 "huashu-design": 고품질 HTML 시안 제작)');
+});
+
+test('skillPointerBlock and skillCatalogBlock stay short and reference the absolute skill folder', () => {
+  const pointer = skillPointerBlock({ name: 'huashu-design', dir: 'C:\\ws\\.claude\\skills\\huashu-design' });
+  assert.equal(pointer.split('\n').filter(Boolean).length, 3);
+  assert.ok(pointer.includes('C:\\ws\\.claude\\skills\\huashu-design'));
+
+  assert.equal(skillCatalogBlock([]), '');
+  const catalog = skillCatalogBlock([{ name: 'a', description: 'd1' }, { name: 'b', description: 'd2' }]);
+  assert.ok(catalog.includes('/a: d1'));
+  assert.ok(catalog.includes('/b: d2'));
+});
+
+test('validateSkillName accepts lowercase-digits-hyphen only', () => {
+  assert.ok(validateSkillName('release-checklist'));
+  assert.ok(validateSkillName('a1'));
+  assert.ok(!validateSkillName('Release'));
+  assert.ok(!validateSkillName('-leading'));
+  assert.ok(!validateSkillName('has space'));
+  assert.ok(!validateSkillName(''));
+});
+
+test('writeSkill preserves existing frontmatter keys (e.g. allowed-tools) across an edit, and deleteSkill refuses bad input', () => {
+  const { wsPath, userDir } = mkSkillWorkspace();
+  try {
+    const first = writeSkill({ wsPath, scope: 'project', name: 'my-tool', description: '첫 설명', body: '첫 본문' });
+    const projectDir = path.join(wsPath, '.claude', 'skills', 'my-tool');
+    assert.equal(first.dir, projectDir);
+    // Simulate a hand-edited allowed-tools key that the UI doesn't expose.
+    const raw1 = fs.readFileSync(path.join(projectDir, 'SKILL.md'), 'utf8');
+    fs.writeFileSync(path.join(projectDir, 'SKILL.md'), raw1.replace('---\n\n첫 본문', 'allowed-tools: Bash, Read\n---\n\n첫 본문'));
+
+    writeSkill({ wsPath, scope: 'project', name: 'my-tool', description: '두번째 설명', body: '두번째 본문' });
+    const raw2 = fs.readFileSync(path.join(projectDir, 'SKILL.md'), 'utf8');
+    const parsed = parseFrontmatter(raw2);
+    assert.equal(parsed.fields['allowed-tools'], 'Bash, Read');
+    assert.equal(parsed.fields.description, '두번째 설명');
+    assert.equal(parsed.body, '두번째 본문\n');
+    assert.ok(!raw2.startsWith('\uFEFF'));
+    assert.ok(!raw2.includes('\r\n'));
+
+    assert.throws(() => writeSkill({ wsPath, scope: 'project', name: 'Bad Name', description: 'd', body: 'b' }));
+    assert.throws(() => deleteSkill({ wsPath, scope: 'project', name: '../../etc' }));
+    assert.throws(() => deleteSkill({ wsPath, scope: 'project', name: 'never-created' }));
+
+    deleteSkill({ wsPath, scope: 'project', name: 'my-tool' });
+    assert.ok(!fs.existsSync(projectDir));
+  } finally {
+    fs.rmSync(wsPath, { recursive: true, force: true });
+    fs.rmSync(userDir, { recursive: true, force: true });
+    delete process.env.CLAUDE_CONFIG_DIR;
+  }
+});
+
+test('listImportableSkills groups other workspaces\' project skills, excluding the current workspace and user scope', () => {
+  const { wsPath: wsA, userDir } = mkSkillWorkspace();
+  const wsB = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-remote-ws-'));
+  const wsC = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-remote-ws-'));
+  try {
+    writeSkillFile(path.join(userDir, 'skills'), 'user-only', '---\nname: user-only\ndescription: d\n---', 'b');
+    writeSkillFile(path.join(wsA, '.claude', 'skills'), 'current-proj', '---\nname: current-proj\ndescription: d\n---', 'b');
+    writeSkillFile(path.join(wsB, '.claude', 'skills'), 'from-b-1', '---\nname: from-b-1\ndescription: d1\n---', 'b1');
+    writeSkillFile(path.join(wsB, '.claude', 'skills'), 'from-b-2', '---\nname: from-b-2\ndescription: d2\n---', 'b2');
+
+    const workspaces = [
+      { id: 1, name: 'A (current)', path: wsA },
+      { id: 2, name: 'B', path: wsB },
+      { id: 3, name: 'C (empty)', path: wsC },
+    ];
+    const groups = listImportableSkills(wsA, workspaces);
+    assert.equal(groups.length, 1);
+    assert.equal(groups[0].workspaceId, 2);
+    assert.deepEqual(groups[0].skills.map((s) => s.name).sort(), ['from-b-1', 'from-b-2']);
+  } finally {
+    fs.rmSync(wsA, { recursive: true, force: true });
+    fs.rmSync(wsB, { recursive: true, force: true });
+    fs.rmSync(wsC, { recursive: true, force: true });
+    fs.rmSync(userDir, { recursive: true, force: true });
+    delete process.env.CLAUDE_CONFIG_DIR;
+  }
+});
+
+test('copySkill copies nested files, requires overwrite for name clashes, supports move, and rejects bad names', () => {
+  const { wsPath: wsA, userDir } = mkSkillWorkspace();
+  const wsB = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-remote-ws-'));
+  try {
+    const srcDir = writeSkillFile(path.join(wsB, '.claude', 'skills'), 'my-tool', '---\nname: my-tool\ndescription: d\n---', 'body');
+    fs.mkdirSync(path.join(srcDir, 'scripts'));
+    fs.writeFileSync(path.join(srcDir, 'scripts', 'run.js'), 'console.log(1)');
+
+    const saved = copySkill({ srcDir, wsPath: wsA, scope: 'project', name: 'my-tool' });
+    const destDir = path.join(wsA, '.claude', 'skills', 'my-tool');
+    assert.equal(saved.dir, destDir);
+    assert.ok(fs.existsSync(path.join(destDir, 'SKILL.md')));
+    assert.ok(fs.existsSync(path.join(destDir, 'scripts', 'run.js')));
+    assert.ok(fs.existsSync(srcDir)); // copy, not move: source untouched
+
+    assert.throws(() => copySkill({ srcDir, wsPath: wsA, scope: 'project', name: 'my-tool' }), (e) => e.code === 'EXISTS');
+    copySkill({ srcDir, wsPath: wsA, scope: 'project', name: 'my-tool', overwrite: true }); // succeeds with overwrite
+
+    const moveSrcDir = writeSkillFile(path.join(wsB, '.claude', 'skills'), 'to-move', '---\nname: to-move\ndescription: d\n---', 'body');
+    copySkill({ srcDir: moveSrcDir, wsPath: wsA, scope: 'user', name: 'to-move', move: true });
+    assert.ok(fs.existsSync(path.join(userDir, 'skills', 'to-move', 'SKILL.md')));
+    assert.ok(!fs.existsSync(moveSrcDir));
+
+    assert.throws(() => copySkill({ srcDir, wsPath: wsA, scope: 'project', name: '../evil' }));
+  } finally {
+    fs.rmSync(wsA, { recursive: true, force: true });
+    fs.rmSync(wsB, { recursive: true, force: true });
+    fs.rmSync(userDir, { recursive: true, force: true });
+    delete process.env.CLAUDE_CONFIG_DIR;
+  }
+});
+
+test('agent menu button lives in the topbar and the sheet keeps all six actions', () => {
+  const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const topbar = html.slice(html.indexOf('<header'), html.indexOf('</header>'));
+  assert.match(topbar, /id="btn-agent-menu"/);
+  const menu = html.slice(html.indexOf('id="dlg-agent-menu"'), html.indexOf('</dialog>', html.indexOf('id="dlg-agent-menu"')));
+  for (const act of ['rename', 'skills', 'compact', 'reset', 'clear', 'delete']) {
+    assert.match(menu, new RegExp(`data-act="${act}"`), `missing data-act="${act}" in agent menu`);
+  }
+});
+
+// ---------- 예약 실행 · 오늘 한 일 · 승인 묶음 · 되돌리기 ----------
+const { describeDays, lastDue, nextDue, normalizeDays, isValidTime, tick: schedulerTick } = await import('../server/scheduler.js');
+const { buildDigest, digestPushText, dayBounds } = await import('../server/digest.js');
+const { Approvals, Schedules, Snapshots, dailyActivity } = await import('../server/db.js');
+const { requestApproval, resolveApproval, setBlanketAllow, blanketAllow } = await import('../server/approvals.js');
+const { snapshotTree, treeChanges, restoreTree } = await import('../server/git.js');
+const { execFileSync } = await import('node:child_process');
+
+test('schedule times: due within the grace window, next occurrence honours weekdays, day lists normalize', () => {
+  const at = (s) => new Date(s).getTime();
+  assert.equal(lastDue('09:00', '', at('2026-09-17T09:05:00')), at('2026-09-17T09:00:00'));
+  assert.equal(lastDue('09:00', '', at('2026-09-17T09:20:00')), null);           // past the 15-minute grace
+  assert.equal(lastDue('23:50', '', at('2026-09-18T00:02:00')), at('2026-09-17T23:50:00')); // yesterday still counts
+  assert.equal(lastDue('09:00', '1,2,3,4,5', at('2026-09-19T09:03:00')), null);   // Saturday, weekdays only
+  assert.equal(nextDue('09:00', '1,2,3,4,5', at('2026-09-19T10:00:00')), at('2026-09-21T09:00:00'));
+  assert.equal(nextDue('09:00', '', at('2026-09-17T08:00:00')), at('2026-09-17T09:00:00'));
+  assert.equal(normalizeDays([0, 1, 2, 3, 4, 5, 6]), '');
+  assert.equal(normalizeDays('5,1,9,x'), '1,5');
+  assert.equal(describeDays(''), '매일');
+  assert.equal(describeDays('1,2,3,4,5'), '평일');
+  assert.equal(describeDays('0,6'), '주말');
+  assert.equal(describeDays('2,4'), '화·목');
+  assert.ok(isValidTime('07:30') && !isValidTime('24:00') && !isValidTime('9:30'));
+});
+
+test('scheduler fires a due schedule once and retries a busy agent inside the grace window', () => {
+  const ws = Workspaces.create('sched-ws', path.join(os.tmpdir(), `sched-ws-${process.pid}`));
+  const agent = Agents.create(ws.id, 'claude', '예약봇');
+  const s = Schedules.create(agent.id, '점검해줘', '09:00', '');
+  Agents.update(agent.id, { status: 'working' });
+  schedulerTick({}, new Date('2026-09-17T09:01:00').getTime());
+  assert.equal(Schedules.get(s.id).last_run_at, null, 'busy agent: not fired yet');
+  Agents.update(agent.id, { status: 'idle' });
+  // startPrompt fails here (no workspace folder / CLI) but the slot still counts as attempted
+  schedulerTick({}, new Date('2026-09-17T09:02:00').getTime());
+  assert.ok(Schedules.get(s.id).last_run_at, 'fired once the agent was free');
+  const firedAt = Schedules.get(s.id).last_run_at;
+  schedulerTick({}, new Date('2026-09-17T09:03:00').getTime());
+  assert.equal(Schedules.get(s.id).last_run_at, firedAt, 'not fired twice for the same slot');
+  Schedules.remove(s.id);
+  Workspaces.remove(ws.id);
+});
+
+test('daily digest rolls up per-agent requests, files and cost for the local day', () => {
+  const ws = Workspaces.create('digest-ws', path.join(os.tmpdir(), `digest-ws-${process.pid}`));
+  const a = Agents.create(ws.id, 'claude', '요약봇');
+  const b = Agents.create(ws.id, 'codex', '조용한봇');
+  Messages.add(a.id, 'user', '첫 지시');
+  Messages.add(a.id, 'user', '둘째 지시');
+  Messages.add(a.id, 'assistant', '네, 처리했습니다.  이제 됩니다.');
+  Messages.add(a.id, 'usage', 'x', { total: { tokens: 1000, fresh: 800, cacheRead: 200, cost: 0.5 } });
+  Snapshots.finish(Snapshots.create(a.id, 'aaaa').id, 'bbbb', 3);
+  // Earlier tests leave their own agents with today's messages behind, so single out ours.
+  const all = buildDigest();
+  const mine = all.agents.find((r) => r.id === a.id);
+  assert.ok(mine, 'active agent is listed');
+  assert.ok(!all.agents.some((r) => r.id === b.id), 'agent with no activity is left out');
+  assert.equal(mine.requests, 2);
+  assert.equal(mine.files, 3);
+  assert.equal(mine.fresh, 800);
+  assert.equal(mine.cost, 0.5);
+  assert.equal(mine.last_reply, '네, 처리했습니다. 이제 됩니다.');
+  const d = { ...all, agents: [mine], totals: { requests: 2, errors: 0, files: 3, fresh: 800, cost: 0.5 } };
+  const push = digestPushText(d);
+  assert.match(push.title, /에이전트 1개/);
+  assert.match(push.body, /지시 2건 · 파일 3개 수정/);
+  assert.ok(push.body.length <= 180);
+  assert.equal(digestPushText({ agents: [], totals: { requests: 0 } }).body, '오늘은 지시한 작업이 없었습니다.');
+  const old = dayBounds('2000-01-01');
+  assert.equal(dailyActivity(old.since, old.until).length, 0);
+  assert.throws(() => dayBounds('nope'));
+  Agents.remove(a.id); Agents.remove(b.id); Workspaces.remove(ws.id);
+});
+
+test('blanket approval: allowing "for this run" auto-allows later tool requests but never questions', async () => {
+  const ws = Workspaces.create('blanket-ws', path.join(os.tmpdir(), `blanket-ws-${process.pid}`));
+  const agent = Agents.create(ws.id, 'claude', '승인봇');
+  const first = requestApproval(agent.id, 'Bash', { command: 'npm test' });
+  const second = requestApproval(agent.id, 'Edit', { file_path: 'a.js' });
+  resolveApproval(first.approval.id, 'allow', { scope: 'run' });
+  assert.ok(blanketAllow(agent.id), 'blanket switched on');
+  assert.equal((await second.promise).behavior, 'allow', 'other pending request resolved too');
+  const third = requestApproval(agent.id, 'Write', { file_path: 'b.js' });
+  assert.equal((await third.promise).behavior, 'allow');
+  assert.equal(Approvals.get(third.approval.id).message, 'blanket');
+  const q = requestApproval(agent.id, 'AskUserQuestion', { questions: [{ question: '어느 쪽?' }] });
+  assert.equal(Approvals.get(q.approval.id).status, 'pending', 'questions still wait for the owner');
+  resolveApproval(q.approval.id, 'deny');
+  setBlanketAllow(agent.id, false);
+  const fourth = requestApproval(agent.id, 'Bash', { command: 'ls' });
+  assert.equal(Approvals.get(fourth.approval.id).status, 'pending', 'asks again once switched off');
+  resolveApproval(fourth.approval.id, 'deny');
+  Agents.remove(agent.id); Workspaces.remove(ws.id);
+});
+
+test('turn snapshots capture tracked + untracked files and undo restores the exact previous tree', async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'snap-'));
+  const git = (...args) => execFileSync('git', args, { cwd: repo, stdio: 'pipe' }).toString();
+  try {
+    git('init', '-q');
+    git('config', 'user.email', 't@t'); git('config', 'user.name', 't');
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'one\n');
+    git('add', '.'); git('commit', '-qm', 'init');
+    const before = await snapshotTree(repo);
+    assert.match(before, /^[0-9a-f]{40}$/);
+    fs.writeFileSync(path.join(repo, 'a.txt'), 'one\ntwo\n');
+    fs.writeFileSync(path.join(repo, 'new.txt'), 'hello');
+    fs.mkdirSync(path.join(repo, 'sub'));
+    fs.writeFileSync(path.join(repo, 'sub', 'x.txt'), 'x');
+    const after = await snapshotTree(repo);
+    assert.notEqual(after, before);
+    const changes = await treeChanges(repo, before, after);
+    assert.deepEqual(changes.files.sort(), ['a.txt', 'new.txt', 'sub/x.txt']);
+    assert.ok(git('status', '--porcelain').includes('?? new.txt'), 'project index untouched');
+    const r = await restoreTree(repo, after, before);
+    assert.equal(r.files, 3);
+    assert.equal(fs.readFileSync(path.join(repo, 'a.txt'), 'utf8').replace(/\r\n/g, '\n'), 'one\n');
+    assert.ok(!fs.existsSync(path.join(repo, 'new.txt')));
+    assert.ok(!fs.existsSync(path.join(repo, 'sub', 'x.txt')));
+    assert.equal(await snapshotTree(repo), before, 'tree identical to the pre-run snapshot');
+    assert.equal(await snapshotTree(os.tmpdir()), null, 'outside a repo: no snapshot, no undo');
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('phone UI wires the new features: allow-all button, undo card, mic, schedules, digest', () => {
+  const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const js = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  assert.match(html, /data-act="schedules"/);
+  assert.match(html, /id="dlg-schedules"/);
+  assert.match(html, /id="dlg-digest"/);
+  assert.match(html, /id="digest-time"/);
+  assert.match(js, /data-allow-run/);
+  assert.match(js, /scope: 'run'/);
+  assert.match(js, /m\.role === 'undo'/);
+  assert.match(js, /webkitSpeechRecognition/);
+  assert.match(js, /case 'blanket\.changed'/);
+  assert.match(js, /q\.get\('digest'\)/);
 });

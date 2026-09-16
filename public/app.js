@@ -2,7 +2,7 @@
 (() => {
   const $ = (s, el = document) => el.querySelector(s);
   const view = $('#view');
-  const state = { token: localStorage.getItem('ar_token') || '', data: null, route: { name: 'home' }, filter: 'all', detail: null, ws: null, meta: null, collapsed: new Set(), draft: {} };
+  const state = { token: localStorage.getItem('ar_token') || '', data: null, route: { name: 'home' }, filter: 'all', detail: null, ws: null, meta: null, collapsed: new Set(), draft: {}, usage: {}, usageLoading: {}, usageOpen: false, skills: {} };
   try { state.collapsed = new Set(JSON.parse(localStorage.getItem('ar_collapsed') || '[]')); } catch {}
 
   // ---------- helpers ----------
@@ -53,6 +53,12 @@
   const modelOptions = (stage, current, agent) => stageCatalog(stage)
     .map((o) => `<option value="${o.value}" ${o.value === current ? 'selected' : ''}>${esc(optionText(o, agent, stage, current))}</option>`)
     .join('');
+  const codexCatalog = () => state.data?.codex?.models || [];
+  const codexDefaultModel = () => state.data?.codex?.model || 'gpt-5.6-terra';
+  const codexModelLabel = (value) => codexCatalog().find((o) => o.value === value)?.label || String(value || '기본 모델');
+  const codexModelOptions = (current) => codexCatalog()
+    .map((o) => `<option value="${o.value}" ${o.value === current ? 'selected' : ''}>${esc(o.label)}</option>`)
+    .join('');
   // Effort ("강도") per pipeline stage, mirroring the desktop "노력" slider: 더 빠르게 ↔ 더 스마트하게.
   const effortLevels = ['low', 'medium', 'high', 'xhigh', 'max'];
   const effortLabel = { low: '낮음', medium: '중간', high: '높음', xhigh: '매우 높음', max: '최대' };
@@ -61,7 +67,9 @@
     exec: { field: 'exec_effort', title: '실행', fallback: null, hint: '기본값은 터미널(Claude CLI) 설정을 따릅니다.' },
     manual: { field: 'effort', title: '실행', fallback: null, hint: '단일 모델: 지정한 모델 하나가 이 강도로 실행됩니다.' },
   };
-  const stageModelName = (agent, stage) => modelLabel(stage === 'plan' ? agent.plan_model : stage === 'exec' ? agent.exec_model : agent.model);
+  const stageModelName = (agent, stage) => agent.kind === 'codex'
+    ? codexModelLabel(agent.codex_model || codexDefaultModel())
+    : modelLabel(stage === 'plan' ? agent.plan_model : stage === 'exec' ? agent.exec_model : agent.model);
   // Composer mode chips (권한 · 흐름), mirroring the desktop app's mode menu.
   // [value, 메뉴에 쓰는 이름, 설명, 칩에 쓰는 짧은 이름]
   const PERM_OPTIONS = {
@@ -89,7 +97,11 @@
   };
   const optionLabel = (opts, value) => (opts.find(([v]) => v === value) || opts[0])[1];
   const chipLabel = (opts, value) => { const o = opts.find(([v]) => v === value) || opts[0]; return o[3] || o[1]; };
-  const stageEffort = (agent, stage) => agent?.[EFFORT_STAGES[stage].field] || null;
+  const stageEffortField = (agent, stage) => stage === 'manual' && agent?.kind === 'codex' ? 'codex_effort' : EFFORT_STAGES[stage].field;
+  const stageEffort = (agent, stage) => agent?.[stageEffortField(agent, stage)] || null;
+  const stageDefaultEffort = (agent, stage) => stage === 'manual' && agent?.kind === 'codex'
+    ? state.data?.codex?.effort || null
+    : EFFORT_STAGES[stage].fallback;
   // Korean directional particle: 최대로 / 높음으로 (ㄹ-final words also take 로).
   const ro = (word) => {
     const code = word.charCodeAt(word.length - 1) - 0xac00;
@@ -100,8 +112,8 @@
   const stageEffortText = (agent, stage) => {
     const v = stageEffort(agent, stage);
     if (v) return effortLabel[v];
-    const fb = EFFORT_STAGES[stage].fallback;
-    return fb ? effortLabel[fb] : '기본';
+    const fb = stageDefaultEffort(agent, stage);
+    return fb ? `${effortLabel[fb] || fb}${stage === 'manual' && agent?.kind === 'codex' ? ' · 기본' : ''}` : '기본';
   };
   const agentStatusText = (agent) => agent?.status === 'needs_attention'
     ? statusLabel.needs_attention
@@ -120,6 +132,7 @@
     trash: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>',
     star: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1.1 5.9L12 16.9l-5.3 2.8 1.1-5.9-4.3-4.1 5.9-.8z"/></svg>',
     edit: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-4-4L4 16z"/></svg>',
+    mic: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>',
   };
   function glyph(status) {
     switch (status) {
@@ -160,7 +173,12 @@
     }
     const ct = res.headers.get('content-type') || '';
     const data = ct.includes('json') ? await res.json() : await res.text();
-    if (!res.ok) throw new Error(data?.error || res.statusText);
+    if (!res.ok) {
+      const err = new Error(data?.error || res.statusText);
+      err.status = res.status;
+      err.data = data;
+      throw err;
+    }
     return data;
   }
 
@@ -250,6 +268,19 @@
         if (state.route.name === 'agent' && state.detail?.agent.id === m.agent.id) loadDetail(m.agent.id, true);
         else if (m.type === 'approval.requested' && state.route.name === 'home') refreshState(true);
         break;
+      case 'blanket.changed':
+        if (state.route.name === 'agent' && state.detail?.agent.id === m.agent_id) {
+          state.detail.agent.blanket_allow = m.on;
+          renderAgentHead();
+        }
+        break;
+      case 'snapshot.undone':
+        if (state.route.name === 'agent' && state.detail?.agent.id === m.agent_id) loadDetail(m.agent_id, true);
+        break;
+      case 'schedule.updated':
+        if (!$('#dlg-schedules').open) break;
+        refreshSchedules();
+        break;
       case 'workspace.created':
       case 'workspace.updated':
       case 'workspace.deleted':
@@ -280,7 +311,10 @@
       box.innerHTML = `<div class="lightbox-bar"><span id="lightbox-caption"></span><button type="button" id="lightbox-close" aria-label="닫기">닫기</button></div><div class="lightbox-body"><img id="lightbox-img" alt=""></div>`;
       document.body.appendChild(box);
       $('#lightbox-close').onclick = () => history.back();
+      // Tap the image to toggle between fit-to-width and native size (for pinch-zoom/scroll on wide captures).
+      $('#lightbox-img').onclick = () => $('.lightbox-body').classList.toggle('full');
     }
+    $('.lightbox-body').classList.remove('full');
     $('#lightbox-img').src = src;
     $('#lightbox-img').alt = caption;
     $('#lightbox-caption').textContent = caption;
@@ -292,6 +326,45 @@
     const box = $('#lightbox');
     if (box) box.hidden = true;
     document.body.classList.remove('lightbox-open');
+  }
+
+  // ---------- skills (/이름 slash commands) ----------
+  async function loadSkills(agentId, force) {
+    if (!force && state.skills[agentId]) return state.skills[agentId];
+    const list = await api(`/agents/${agentId}/skills`);
+    state.skills[agentId] = list;
+    return list;
+  }
+  function invalidateSkills(agentId) { delete state.skills[agentId]; }
+  function closeSkillMenu() {
+    const p = document.querySelector('#skill-popover');
+    if (p) p.hidden = true;
+  }
+  function skillMenuItemsHTML(list) {
+    if (!list.length) return `<div class="menu-item" style="cursor:default"><span><b>등록된 스킬이 없습니다</b><small>에이전트 메뉴 › 스킬에서 만들 수 있어요</small></span></div>`;
+    return list.map((s) => `
+      <button type="button" class="menu-item" data-skill="${esc(s.name)}">
+        <span><b>/${esc(s.name)}</b><small>${esc((s.descriptionKo || s.description || '').slice(0, 60))}</small></span>
+      </button>`).join('');
+  }
+  async function openSkillMenu(filter = '') {
+    const p = $('#skill-popover');
+    if (!p || !state.detail?.agent) return;
+    document.querySelectorAll('#usage-popover, #effort-popover, #mode-popover, #attach-popover').forEach((el) => { el.hidden = true; });
+    let list = [];
+    try { list = await loadSkills(state.detail.agent.id); } catch { closeSkillMenu(); return; }
+    if (!$('#skill-popover')) return; // composer may have unmounted while awaiting
+    const f = filter.toLowerCase();
+    const filtered = f ? list.filter((s) => s.name.toLowerCase().startsWith(f)) : list;
+    $('#skill-items').innerHTML = skillMenuItemsHTML(filtered);
+    $('#skill-items').querySelectorAll('[data-skill]').forEach((b) => (b.onclick = () => {
+      const ta = $('#prompt');
+      ta.value = `/${b.dataset.skill} `;
+      closeSkillMenu();
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    }));
+    p.hidden = false;
   }
 
   // ---------- composer attachments (photos/videos/links) ----------
@@ -447,6 +520,7 @@
     $('#btn-back').hidden = state.route.name === 'home';
     $('#topbar').classList.toggle('has-back', state.route.name !== 'home');
     $('#fab').hidden = state.route.name !== 'home';
+    $('#btn-agent-menu').hidden = !isAgent;
     if (!isAgent) document.querySelectorAll('.composer').forEach((c) => c.remove());
     if (state.route.name === 'home') renderHome();
     else if (isAgent) renderAgent();
@@ -506,12 +580,19 @@
         <div class="h">${esc(comp.name)} <em class="${comp.connected ? '' : 'off'}">${comp.connected ? 'Connected' : 'Offline'}</em></div>
         <div class="sub">${comp.platform === 'win32' ? 'Windows PC' : comp.platform} · 마지막 동기화 ${ago(state.syncedAt || Date.now())}</div>
         <div class="stat"><span>CPU <b>${comp.cpu}%</b></span><span>RAM <b>${comp.mem}%</b></span></div>
+        <div id="usage">${usageHTML()}</div>
       </div>
-      <div class="usage" id="usage">${usageHTML()}</div>
+      <button type="button" class="digest-card" id="digest-card" ${state.digest ? '' : 'hidden'}>${digestCardHTML(state.digest)}</button>
       <div class="rail">${chips}</div>
       ${d.workspaces.length ? groups : '<div class="empty">오른쪽 아래 + 버튼으로 프로젝트 폴더를 추가하세요.</div>'}
       <div style="height:24px"></div>`;
     loadUsage();
+    loadDigestCard();
+    $('#digest-card').onclick = () => openDigest();
+    const usageToggle = view.querySelector('[data-usage-toggle]');
+    if (usageToggle) usageToggle.onclick = () => { state.usageOpen = !state.usageOpen; render(); };
+    const usageRefresh = view.querySelector('[data-usage-refresh]');
+    if (usageRefresh) usageRefresh.onclick = () => loadUsage(true);
     view.querySelectorAll('[data-filter]').forEach((el) => (el.onclick = () => { state.filter = el.dataset.filter; render(); }));
     view.querySelectorAll('[data-agent]').forEach((el) => (el.onclick = () => go({ name: 'agent', id: Number(el.dataset.agent) })));
     view.querySelectorAll('[data-git]').forEach((el) => (el.onclick = () => go({ name: 'workspace', id: Number(el.dataset.git) })));
@@ -533,20 +614,26 @@
   }
 
   // ---------- usage limits ----------
+  const activeUsageProvider = () => state.route.name === 'agent' && state.detail?.agent?.kind === 'codex' ? 'codex' : 'claude';
+  const providerUsage = (provider = activeUsageProvider()) => state.usage?.[provider] || null;
   function usageHTML() {
-    const u = state.usage;
-    if (!u) return '<div class="urow muted small">사용량 불러오는 중…</div>';
-    if (!u.ok && !u.items?.length) return `<div class="urow muted small">사용량을 읽지 못했습니다${u.error ? ` · ${esc(u.error)}` : ''}</div>`;
-    return u.items.map((it) => `
-      <div class="urow">
-        <span class="ul">${esc(it.label)}</span>
-        <span class="ubar"><i style="width:${Math.min(100, it.pct)}%" class="${it.pct >= 90 ? 'hot' : it.pct >= 70 ? 'warm' : ''}"></i></span>
-        <span class="up ${it.pct >= 90 ? 'hot' : ''}">${it.pct}%</span>
-        <span class="ur">${esc(it.resets ? '리셋 ' + it.resets : '')}</span>
-      </div>`).join('');
+    const u = providerUsage('claude');
+    if (!u) return '<div class="limits-hint">사용량 불러오는 중…</div>';
+    if (!u.ok && !u.items?.length) return `<div class="limits-hint">사용량을 읽지 못했습니다${u.error ? ` · ${esc(u.error)}` : ''}</div>`;
+    const pills = usageSlots('claude').map(([label, item]) => {
+      const pct = item ? Math.max(0, Math.min(100, Number(item.pct) || 0)) : null;
+      const tone = pct == null ? '' : pct >= 90 ? 'hot' : pct >= 70 ? 'warm' : '';
+      return `<div class="pill ${tone}"><span class="pt">${label.replace(' 한도', '')} <b>${pct == null ? '—' : pct + '%'}</b></span><span class="pl"><i style="width:${pct == null ? 0 : pct}%"></i></span></div>`;
+    }).join('');
+    const open = state.usageOpen;
+    return `<button type="button" class="limits" data-usage-toggle aria-expanded="${open}">${pills}</button>
+      ${open
+        ? `<div class="limits-card"><div class="usage-popover-head"><strong>Claude 사용 한도</strong><button type="button" data-usage-refresh>새로고침</button></div>${usagePopupHTML()}</div>`
+        : '<div class="limits-hint">탭하면 리셋 시각을 볼 수 있어요</div>'}`;
   }
-  function usageSlots() {
-    const items = state.usage?.items || [];
+  function usageSlots(provider = activeUsageProvider()) {
+    const items = providerUsage(provider)?.items || [];
+    if (provider === 'codex') return items.map((item) => [item.label, item]);
     return [
       ['5시간 한도', items.find((it) => /5시간|current session/i.test(it.label))],
       ['주간 한도', items.find((it) => /주간.*전체|current week.*all models/i.test(it.label))],
@@ -554,14 +641,15 @@
     ];
   }
   function usagePopupHTML() {
-    if (!state.usage) return '<div class="usage-empty">사용량을 불러오는 중…</div>';
-    if (!state.usage.ok && !state.usage.items?.length) return `<div class="usage-empty">사용량을 읽지 못했습니다${state.usage.error ? `<small>${esc(state.usage.error)}</small>` : ''}</div>`;
+    const usage = providerUsage();
+    if (!usage) return '<div class="usage-empty">사용량을 불러오는 중…</div>';
+    if (!usage.ok && !usage.items?.length) return `<div class="usage-empty">사용량을 읽지 못했습니다${usage.error ? `<small>${esc(usage.error)}</small>` : ''}</div>`;
     const limits = usageSlots().map(([label, item]) => `
       <div class="usage-popover-row">
         <div><strong>${label}</strong><small>${item?.resets ? `리셋 ${esc(item.resets)}` : item ? '리셋 시각 정보 없음' : '별도 사용량 항목 없음'}</small></div>
         <b class="${item?.pct >= 90 ? 'hot' : item?.pct >= 70 ? 'warm' : ''}">${item ? `${item.pct}%` : '—'}</b>
       </div>`).join('');
-    return limits + agentTokenUsageHTML();
+    return limits + memoryUsageHTML() + agentTokenUsageHTML();
   }
   // Cumulative token usage for the currently open agent (per-run cards are computed in tokens.js
   // on the server; this just reads the two rollups it stores alongside GET /agents/:id).
@@ -572,15 +660,31 @@
       if (!r.runs) return '';
       const cost = fmtUsd(r.cost);
       const saved = r.baseline_cost > 0 && r.cost != null ? Math.round((1 - r.cost / r.baseline_cost) * 100) : null;
+      const tokBits = [`새 토큰 ${fmtTokens(r.fresh)}`];
+      if (r.cache_read) tokBits.push(`다시 읽기 ${fmtTokens(r.cache_read)}`);
       return `<div class="usage-popover-row">
-        <div><strong>${label}</strong><small>${r.runs}지시 · 토큰 ${fmtTokens(r.tokens)}</small></div>
+        <div><strong>${label}</strong><small>${r.runs}지시 · ${tokBits.join(' · ')}</small></div>
         <b>${cost ? cost : '—'}${saved != null && saved > 0 ? ` · ${saved}%↓` : ''}</b>
       </div>`;
     };
     return `<div class="usage-popover-sep">이 대화</div>${row('오늘', s.today)}${row('전체', s.all)}`;
   }
+  // How much of the running conversation the model has to re-read every turn; 대화 정리 resets
+  // this to 0 once it crosses compact_limit (server/config.js compactAfterTokens).
+  function memoryUsageHTML() {
+    const agent = state.detail?.agent;
+    const limit = agent?.compact_limit;
+    if (!agent || !limit) return '';
+    const used = agent.context_tokens || 0;
+    const pct = Math.min(100, Math.round((used / limit) * 100));
+    const hot = pct >= 80;
+    return `<div class="usage-popover-row">
+      <div><strong>이 대화 기억</strong><small>${hot ? '곧 자동으로 요약해서 정리됩니다' : '기준을 넘으면 자동으로 요약해서 정리됩니다'}</small></div>
+      <b class="${hot ? 'hot' : ''}">${fmtTokens(used)} / ${fmtTokens(limit)}</b>
+    </div>`;
+  }
   function primaryUsage() {
-    const item = usageSlots()[0]?.[1] || state.usage?.items?.[0];
+    const item = usageSlots()[0]?.[1] || providerUsage()?.items?.[0];
     return { pct: Math.max(0, Math.min(100, Number(item?.pct) || 0)), label: item?.label || '5시간 한도' };
   }
   function updateComposerUsage() {
@@ -595,20 +699,28 @@
     }
     const body = $('#usage-popover-body');
     if (body) body.innerHTML = usagePopupHTML();
+    const title = $('#usage-title');
+    if (title) title.textContent = `${activeUsageProvider() === 'codex' ? 'Codex' : 'Claude'} 사용 한도`;
   }
-  async function loadUsage(force) {
-    if (state.usageLoading) return;
-    state.usageLoading = true;
+  async function loadUsage(force, provider = activeUsageProvider()) {
+    if (state.usageLoading[provider]) return;
+    state.usageLoading[provider] = true;
     try {
-      state.usage = await api(`/usage${force ? '?refresh=1' : ''}`);
+      state.usage[provider] = await api(`/usage?provider=${provider}${force ? '&refresh=1' : ''}`);
     } catch (e) {
-      state.usage = { ok: false, error: e.message, items: [] };
+      state.usage[provider] = { ok: false, provider, error: e.message, items: [] };
     } finally {
-      state.usageLoading = false;
+      state.usageLoading[provider] = false;
     }
     const host = $('#usage');
-    if (host) host.innerHTML = usageHTML();
-    updateComposerUsage();
+    if (host) {
+      host.innerHTML = usageHTML();
+      const usageToggle = host.querySelector('[data-usage-toggle]');
+      if (usageToggle) usageToggle.onclick = () => { state.usageOpen = !state.usageOpen; render(); };
+      const usageRefresh = host.querySelector('[data-usage-refresh]');
+      if (usageRefresh) usageRefresh.onclick = () => loadUsage(true);
+    }
+    if (provider === activeUsageProvider()) updateComposerUsage();
   }
 
   function composerControlsHTML(agent, locked) {
@@ -638,7 +750,14 @@
         </div>
         <span class="pipeline-direct">단일 모델</span>`;
     } else {
-      flow = `<span class="pipeline-direct">Codex 직접 실행</span>`;
+      const current = agent.codex_model || '';
+      const defaultLabel = codexModelLabel(codexDefaultModel());
+      flow = `
+        <div class="pipeline-step" title="코덱스 모델 선택">
+          <select id="composer-model" aria-label="코덱스 모델" ${disabled}><option value="" ${!current ? 'selected' : ''}>기본 · ${esc(defaultLabel)}</option>${codexModelOptions(current)}</select>
+          <button type="button" class="step-effort" data-stage="manual" aria-haspopup="dialog" aria-expanded="false" title="생각 깊이 조절" ${disabled}>실행 · <b>${stageEffortText(agent, 'manual')}</b></button>
+        </div>
+        <span class="pipeline-direct">단일 모델</span>`;
     }
     void reviewer;
     return `<div class="pipeline-flow" aria-label="자동 실행 흐름">${flow}</div>`;
@@ -687,7 +806,9 @@
     const reviewerName = agent.kind === 'codex' ? 'Claude' : 'Codex';
     const flowCopy = agent.collab_mode
       ? `${providerName} 구현 → ${reviewerName} 리뷰 → ${providerName} 수정`
-      : `${providerName}에서 다음 지시를 이어갑니다`;
+      : agent.kind === 'codex'
+        ? `Codex · ${codexModelLabel(agent.codex_model || codexDefaultModel())} · 단일 모델`
+        : `${providerName}에서 다음 지시를 이어갑니다`;
     const switchLocked = !!(agent.running || agent.status === 'working' || agent.status === 'needs_attention' || agent.pending_plan);
     $('#topbar-title').textContent = agent.name;
     const y = keepScroll ? window.scrollY : null;
@@ -696,8 +817,6 @@
         <div class="badges">
           <span class="badge ${agent.status}" id="agent-status">${agentStatusText(agent)}</span>
           <span class="badge-note">권한·모델 구성·강도는 입력창 위에서 바꿉니다</span>
-          <span class="spacer"></span>
-          <button class="icon-btn" id="agent-menu" aria-label="더 보기">${ICON.more}</button>
         </div>
         <div class="path">${esc(tailPath(workspace.path, 40))}${agent.session_id ? ` · ${esc(agent.session_id.slice(0, 8))}` : ''}</div>
         <div class="provider-bar">
@@ -719,7 +838,7 @@
       composer.className = 'composer';
       composer.dataset.agent = String(agent.id);
       composer.innerHTML = `<div class="usage-popover" id="usage-popover" hidden>
-        <div class="usage-popover-head"><strong>Claude 사용 한도</strong><button type="button" id="usage-refresh" aria-label="사용량 새로고침">새로고침</button></div>
+        <div class="usage-popover-head"><strong id="usage-title">사용 한도</strong><button type="button" id="usage-refresh" aria-label="사용량 새로고침">새로고침</button></div>
         <div id="usage-popover-body"></div>
       </div>
       <div class="effort-popover" id="effort-popover" role="dialog" aria-label="강도 설정" hidden>
@@ -731,7 +850,8 @@
       </div>
       <div class="planbar" id="planbar" hidden><span>계획이 준비되었습니다.</span><button class="btn primary" id="exec-plan">이 계획대로 실행</button></div>
       <div id="approvals"></div>
-      <div class="progress" id="progress" hidden><span class="spin" aria-hidden="true"></span><span id="progress-text">작업 중</span><span id="progress-time" class="mono"></span></div>
+      <div class="progress" id="progress" hidden><span class="spin" aria-hidden="true"></span><span id="progress-text">작업 중</span><span id="progress-time" class="mono"></span><button type="button" class="progress-act" id="progress-blanket" hidden>남은 승인 모두 허용</button></div>
+      <div class="blanketbar" id="blanketbar" hidden><span>이번 작업의 승인 요청을 자동으로 허용하는 중</span><button type="button" id="blanket-off">해제</button></div>
       <div class="menu-popover" id="mode-popover" role="menu" hidden>
         <div class="menu-head" id="mode-title"></div>
         <div id="mode-items"></div>
@@ -741,6 +861,11 @@
         <button type="button" class="menu-item" id="attach-pick"><span><b>사진·동영상 선택</b><small>갤러리에서 고르기</small></span></button>
         <button type="button" class="menu-item" id="attach-camera"><span><b>카메라로 찍기</b><small>바로 촬영</small></span></button>
         <button type="button" class="menu-item" id="attach-link"><span><b>링크 추가</b><small>웹페이지 주소 붙여넣기</small></span></button>
+        <button type="button" class="menu-item" id="attach-skill"><span><b>스킬 사용</b><small>/이름으로 저장된 지침 불러오기</small></span></button>
+      </div>
+      <div class="menu-popover" id="skill-popover" role="menu" hidden>
+        <div class="menu-head">스킬</div>
+        <div id="skill-items"></div>
       </div>
       <input type="file" id="attach-input" accept="image/*,video/*" multiple hidden>
       <input type="file" id="attach-camera-input" accept="image/*" capture="environment" hidden>
@@ -749,6 +874,7 @@
       <div class="composer-controls" id="composer-controls"></div>
       <div class="inner">
         <button type="button" class="btn attach-btn" id="attach-btn" aria-label="첨부" aria-haspopup="menu" aria-expanded="false">${ICON.plus}</button>
+        <button type="button" class="btn attach-btn mic-btn" id="mic-btn" aria-label="말로 지시" aria-pressed="false" hidden>${ICON.mic}</button>
         <textarea id="prompt" rows="1" placeholder="지시를 입력하세요…"></textarea>
         <button class="btn primary" id="send">보내기</button>
         <button class="btn stop" id="stop" hidden>중지</button>
@@ -756,8 +882,15 @@
       document.body.appendChild(composer);
       $('#exec-plan').onclick = async () => { try { await api(`/agents/${state.detail.agent.id}/execute-plan`, { method: 'POST' }); toast('실행 시작'); } catch (e) { toast(e.message); } };
       const ta = $('#prompt');
-      ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'; });
-      ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendPrompt(); });
+      ta.addEventListener('input', () => {
+        ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+        const m = ta.value.match(/^\/([a-z0-9-]*)$/i);
+        if (m) openSkillMenu(m[1]); else closeSkillMenu();
+      });
+      ta.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendPrompt();
+        else if (e.key === 'Escape' && !$('#skill-popover').hidden) closeSkillMenu();
+      });
       $('#send').onclick = sendPrompt;
       $('#stop').onclick = async () => { await api(`/agents/${state.detail.agent.id}/stop`, { method: 'POST' }); toast('중지 요청'); };
       $('#usage-refresh').onclick = () => loadUsage(true);
@@ -781,13 +914,32 @@
       };
       $('#attach-input').onchange = (e) => { handleFiles(state.detail.agent.id, e.target.files); e.target.value = ''; };
       $('#attach-camera-input').onchange = (e) => { handleFiles(state.detail.agent.id, e.target.files); e.target.value = ''; };
+      $('#attach-skill').onclick = () => { closeAttachMenu(); openSkillMenu(''); };
+      $('#blanket-off').onclick = async () => {
+        try { await api(`/agents/${state.detail.agent.id}/blanket`, { method: 'POST', body: { on: false } }); toast('다음 요청부터 다시 승인을 받습니다'); }
+        catch (e) { toast(e.message); }
+      };
+      $('#progress-blanket').onclick = async () => {
+        if (!confirm('이번 작업이 끝날 때까지 파일 수정·명령 실행 요청을 묻지 않고 모두 허용합니다. 질문은 그대로 받습니다. 계속할까요?')) return;
+        try { await api(`/agents/${state.detail.agent.id}/blanket`, { method: 'POST', body: { on: true } }); toast('이번 작업 동안 모두 허용합니다'); }
+        catch (e) { toast(e.message); }
+      };
+      setupVoice(ta);
     }
     renderAttachStrip(agent.id);
     $('#composer-controls').innerHTML = composerControlsHTML(agent, switchLocked);
     $('#composer-modes').innerHTML = composerModesHTML(agent, switchLocked);
     updateComposerUsage();
     const triageSel = $('#composer-triage'), planSel = $('#composer-plan'), execSel = $('#composer-exec'), manualSel = $('#composer-model');
-    if (manualSel) manualSel.onchange = (e) => patchAgent({ model: e.target.value || null }, `실행 모델을 ${modelLabel(e.target.value)}로 변경했습니다`).then(() => syncEffortUI('manual'));
+    if (manualSel) manualSel.onchange = (e) => {
+      const isCodex = state.detail.agent.kind === 'codex';
+      const field = isCodex ? 'codex_model' : 'model';
+      const label = isCodex ? codexModelLabel(e.target.value || codexDefaultModel()) : modelLabel(e.target.value);
+      return patchAgent({ [field]: e.target.value || null }, `실행 모델을 ${label}로 변경했습니다`).then(() => {
+        syncEffortUI('manual');
+        renderAgentHead();
+      });
+    };
     if (triageSel) triageSel.onchange = (e) => patchAgent({ triage_model: e.target.value }, `판단 모델을 ${modelLabel(e.target.value)}로 변경했습니다`);
     if (planSel) planSel.onchange = (e) => patchAgent({ plan_model: e.target.value }, `계획 모델을 ${modelLabel(e.target.value)}로 변경했습니다`);
     if (execSel) execSel.onchange = (e) => patchAgent({ exec_model: e.target.value }, `실행 모델을 ${modelLabel(e.target.value)}로 변경했습니다`);
@@ -805,18 +957,20 @@
       closeEffort(); closeMode(); closeAttachMenu();
       usagePopover.hidden = !usagePopover.hidden;
       usageRing.setAttribute('aria-expanded', String(!usagePopover.hidden));
-      if (!usagePopover.hidden) loadUsage(true);
+      if (!usagePopover.hidden) loadUsage();
     };
     // Per-stage effort slider (계획 / 실행). Opens above the composer, saves on release.
     const effortRange = $('#effort-range'), effortValue = $('#effort-value'), effortReset = $('#effort-reset');
     const syncEffortUI = (stage) => {
       const meta = EFFORT_STAGES[stage];
       const current = stageEffort(state.detail.agent, stage);
-      const shown = current || meta.fallback || 'high';
+      const shown = current || stageDefaultEffort(state.detail.agent, stage) || 'high';
       effortRange.value = String(Math.max(0, effortLevels.indexOf(shown)));
       effortValue.textContent = current ? effortLabel[current] : `${effortLabel[shown]} (기본)`;
       $('#effort-title').textContent = `${meta.title} 강도 · ${stageModelName(state.detail.agent, stage)}`;
-      $('#effort-hint').textContent = meta.hint;
+      $('#effort-hint').textContent = stage === 'manual' && state.detail.agent.kind === 'codex'
+        ? '중간이 속도와 결과 품질의 균형값입니다. 어려운 작업만 높여 주세요.'
+        : meta.hint;
       effortReset.hidden = !current;
       const chip = document.querySelector(`.step-effort[data-stage="${stage}"] b`);
       if (chip) chip.textContent = stageEffortText(state.detail.agent, stage);
@@ -835,13 +989,13 @@
       effortRange.oninput = () => { effortValue.textContent = effortLabel[effortLevels[Number(effortRange.value)]]; };
       effortRange.onchange = async () => {
         const stage = effortPopover.dataset.stage, level = effortLevels[Number(effortRange.value)];
-        try { await patchAgent({ [EFFORT_STAGES[stage].field]: level }, `${EFFORT_STAGES[stage].title} 강도를 ${ro(effortLabel[level])} 변경했습니다`); }
+        try { await patchAgent({ [stageEffortField(state.detail.agent, stage)]: level }, `${EFFORT_STAGES[stage].title} 강도를 ${ro(effortLabel[level])} 변경했습니다`); }
         catch (e) { toast(e.message); }
         syncEffortUI(stage);
       };
       effortReset.onclick = async () => {
         const stage = effortPopover.dataset.stage;
-        try { await patchAgent({ [EFFORT_STAGES[stage].field]: null }, `${EFFORT_STAGES[stage].title} 강도를 기본값으로 되돌렸습니다`); }
+        try { await patchAgent({ [stageEffortField(state.detail.agent, stage)]: null }, `${EFFORT_STAGES[stage].title} 강도를 기본값으로 되돌렸습니다`); }
         catch (e) { toast(e.message); }
         syncEffortUI(stage);
       };
@@ -918,6 +1072,7 @@
         if (!t.closest?.('#mode-popover, .mode-chip')) closeMode();
         if (!t.closest?.('#usage-popover, #usage-ring')) closeUsage();
         if (!t.closest?.('#attach-popover, #attach-btn')) closeAttachMenu();
+        if (!t.closest?.('#skill-popover, #prompt, #attach-skill')) closeSkillMenu();
       });
     }
     const collab = $('#collab-mode');
@@ -934,8 +1089,7 @@
         toast(e.message);
       }
     };
-    $('#agent-menu').onclick = () => $('#dlg-agent-menu').showModal();
-
+    state.detail.undone = new Set(messages.filter((m) => m.role === 'system' && m.meta && m.meta.includes('"undone":true')).map((m) => { try { return JSON.parse(m.meta).snapshot_id; } catch { return null; } }));
     let lastDay = '';
     for (const m of messages) {
       const day = new Date(m.created_at).toLocaleDateString('ko-KR', { month: 'long', day: 'numeric' });
@@ -945,7 +1099,7 @@
     renderApprovals(approvals);
     renderAgentHead();
     syncComposerSpace();
-    if (!state.usage) loadUsage();
+    if (!providerUsage(agent.kind)) loadUsage(false, agent.kind);
     const sendButton = $('#send');
     if (sendButton) sendButton.textContent = agent.collab_mode ? '협업 실행' : '보내기';
     if (y !== null) window.scrollTo(0, y);
@@ -997,15 +1151,24 @@
       const activeProvider = a.collab_stage === 'review' ? reviewer : owner;
       flow.textContent = a.collab_stage
         ? `${activeProvider} · ${collabStageLabel[a.collab_stage] || '협업 중'}`
-        : a.collab_mode ? `${owner} 구현 → ${reviewer} 리뷰 → ${owner} 수정` : `${owner}에서 다음 지시를 이어갑니다`;
+        : a.collab_mode
+          ? `${owner} 구현 → ${reviewer} 리뷰 → ${owner} 수정`
+          : a.kind === 'codex'
+            ? `Codex · ${codexModelLabel(a.codex_model || codexDefaultModel())} · 단일 모델`
+            : `${owner}에서 다음 지시를 이어갑니다`;
     }
     const pendingPlan = !!a.pending_plan;
     const running = !pendingPlan && (a.running || a.status === 'working' || a.status === 'needs_attention');
-    const send = $('#send'), stop = $('#stop'), planbar = $('#planbar');
+    const send = $('#send'), stop = $('#stop'), planbar = $('#planbar'), blanketbar = $('#blanketbar'), progressBlanket = $('#progress-blanket');
     if (send) send.hidden = running;
     if (stop) stop.hidden = !running;
     if (planbar) planbar.hidden = !pendingPlan;
+    const blanket = running && !!a.blanket_allow;
+    if (blanketbar) blanketbar.hidden = !blanket;
+    // Only 매번 승인 agents ask often enough for "모두 허용" to save taps; the other modes already run through.
+    if (progressBlanket) progressBlanket.hidden = blanket || a.permission_mode !== 'ask';
     updateProgress(a, running);
+    syncComposerSpace();
   }
   // Tool calls and their results are folded into one "activity" group per burst, like the desktop
   // apps: a one-line summary (실행된 명령 N개, 사용한 도구 M개) that expands to the raw details.
@@ -1084,18 +1247,39 @@
         const stageLabel = { triage: '판단', plan: '계획', exec: '실행', manual: '실행' };
         const rows = u.stages.map((s) => {
           const label = `${stageLabel[s.stage] || s.stage}${s.phase ? ` · ${phaseLabel[s.phase] || s.phase}` : ''} · ${modelLabel(s.model)}`;
-          const cacheNote = s.cacheRead ? ` (캐시 ${fmtTokens(s.cacheRead)})` : '';
+          const cacheBits = [];
+          if (s.cacheWrite) cacheBits.push(`저장 ${fmtTokens(s.cacheWrite)}`);
+          if (s.cacheRead) cacheBits.push(`다시 읽기 ${fmtTokens(s.cacheRead)}`);
+          const cacheNote = cacheBits.length ? ` (${cacheBits.join(' · ')})` : '';
           const tok = `입력 ${fmtTokens(s.input)}${cacheNote} · 출력 ${fmtTokens(s.output)}`;
           const cost = fmtUsd(s.cost);
           return `<div class="usage-row"><b>${esc(label)}</b><span>${esc(tok)}</span><i>${cost ? esc(cost) : '—'}</i></div>`;
         }).join('');
-        const note = '"새 토큰"은 이번에 새로 처리한 양(데스크톱 앱이 보여주는 숫자와 같은 기준), "다시 읽기"는 이전 대화를 기억에서 다시 읽은 양입니다. 다시 읽기는 토큰당 비용이 약 10분의 1이지만 대화가 길수록 커지므로, 대화 정리가 이 값을 줄입니다. 구독 요금제라 실제 청구는 아니고 API 요금으로 환산한 값입니다.'
+        const note = '"새 토큰"은 이번에 새로 주고받은 양, "캐시 저장"은 오래 쉬었다가 지시하거나 모델을 바꿨을 때 대화를 다시 기억시키는 비용, "다시 읽기"는 이미 기억하고 있던 대화를 다시 읽은 양입니다(데스크톱 앱의 "새 토큰"은 이 중 "새 토큰"+"캐시 저장"을 합친 값과 같은 기준입니다). 다시 읽기는 토큰당 비용이 약 10분의 1이지만 대화가 길수록 커지므로, 대화 정리가 이 값을 줄입니다. 구독 요금제라 실제 청구는 아니고 API 요금으로 환산한 값입니다.'
           + (u.baseline ? ` 절약률은 모든 단계를 ${esc(modelLabel(u.baseline.model))}로 돌렸을 때와 비교한 추정치입니다.` : '');
         el.innerHTML = `<details class="usage-card"><summary>${esc(m.content)}</summary><div class="usage-rows">${rows}<div class="usage-note">${note}</div></div></details>`;
       }
     } else if (m.role === 'handoff') {
       el.className = 'msg handoff';
       el.textContent = m.content;
+    } else if (m.role === 'undo') {
+      const undone = state.detail?.undone?.has(meta.snapshot_id);
+      el.className = `msg undo ${undone ? 'done' : ''}`;
+      const diff = (meta.added || meta.removed) ? `<span class="diffstat"><ins>+${meta.added || 0}</ins> <del>-${meta.removed || 0}</del></span>` : '';
+      el.innerHTML = `<div class="undo-copy"><b>${esc(m.content)}</b>${diff}<small>${undone ? '작업 전 상태로 되돌렸습니다' : '마음에 들지 않으면 이 작업이 바꾼 파일을 한 번에 원래대로 돌릴 수 있습니다'}</small></div>
+        <button type="button" class="btn undo-btn" ${undone ? 'disabled' : ''}>${undone ? '되돌림' : '원래대로 되돌리기'}</button>`;
+      el.querySelector('.undo-btn').onclick = async () => {
+        if (!confirm(`이 작업이 바꾼 파일 ${meta.files || ''}개를 작업 전 상태로 되돌립니다. 그 뒤에 직접 고친 부분이 있으면 겹치는 곳은 되돌리지 못할 수 있습니다. 진행할까요?`)) return;
+        const btn = el.querySelector('.undo-btn');
+        btn.disabled = true; btn.textContent = '되돌리는 중…';
+        try {
+          const r = await api(`/agents/${state.detail.agent.id}/undo/${meta.snapshot_id}`, { method: 'POST' });
+          toast(`파일 ${r.files}개를 되돌렸습니다`);
+        } catch (e) {
+          btn.disabled = false; btn.textContent = '원래대로 되돌리기';
+          toast(e.message, 3500);
+        }
+      };
     } else if (m.role === 'system') {
       el.className = `msg system ${/^(승인함|거부함|자동|간단|복잡|계획|실행 모델|구독 한도|교차 협업|교차 리뷰|최종 수정|구현)/.test(m.content) ? 'ok' : ''}`;
       el.textContent = shortPath(m.content);
@@ -1104,7 +1288,8 @@
       const source = m.role === 'assistant' && meta.provider
         ? `<span class="msg-source">${esc(kindLabel[meta.provider] || meta.provider)}${meta.phase ? ` · ${esc(phaseLabel[meta.phase] || meta.phase)}` : ''}</span>`
         : '';
-      el.innerHTML = source + (m.role === 'assistant' ? rich(m.content) : esc(m.content))
+      const skillBadge = m.role === 'user' && meta.skill ? `<span class="msg-skill">스킬 · ${esc(meta.skill.name)}</span>` : '';
+      el.innerHTML = source + skillBadge + (m.role === 'assistant' ? rich(m.content) : esc(m.content))
         + (m.role === 'user' ? messageAttachmentsHTML(meta) : '')
         + (m.role === 'user' || m.role === 'assistant' ? `<span class="time">${clock(m.created_at)}</span>` : '');
       el.querySelectorAll('.attachments .image-open').forEach((b) => (b.onclick = () => openLightbox(b.dataset.src, b.dataset.caption)));
@@ -1178,8 +1363,10 @@
         else body = `<div class="diff">${esc(JSON.stringify(input, null, 1).slice(0, 1500))}</div>`;
         card.innerHTML = head + `<h2>${esc(ap.tool_name)} 실행 승인</h2>${body}
           <input class="reason" placeholder="거부 사유 (선택)">
-          <div class="btns"><button class="btn ghost" data-deny>거부</button><button class="btn primary" data-allow>허용</button></div>`;
+          <div class="btns"><button class="btn ghost" data-deny>거부</button><button class="btn primary" data-allow>허용</button></div>
+          <button type="button" class="btn allow-all" data-allow-run>이번 작업 동안 모두 허용<small>끝날 때까지 남은 요청을 묻지 않습니다</small></button>`;
         card.querySelector('[data-allow]').onclick = () => decide(ap.id, 'allow');
+        card.querySelector('[data-allow-run]').onclick = () => decide(ap.id, 'allow', { scope: 'run' });
         card.querySelector('[data-deny]').onclick = () => decide(ap.id, 'deny', { message: card.querySelector('.reason').value.trim() });
       }
       host.appendChild(card);
@@ -1211,7 +1398,16 @@
       renderAttachStrip(agentId);
     } catch (e) { toast(e.message); }
   }
+  $('#btn-agent-menu').onclick = () => {
+    const a = state.detail?.agent;
+    if (!a) return;
+    $('#menu-agent-name').textContent = a.name;
+    $('#menu-agent-status').textContent = agentStatusText(a);
+    $('#menu-schedule-note').textContent = a.schedules ? `예약 ${a.schedules}개 · 정해진 시각에 자동으로 지시` : '정해진 시각에 지시를 자동으로 보내기';
+    $('#dlg-agent-menu').showModal();
+  };
   $('#dlg-agent-menu').addEventListener('click', async (e) => {
+    if (e.target === e.currentTarget) { $('#dlg-agent-menu').close(); return; }
     const act = e.target.closest('[data-act]')?.dataset.act;
     if (!act) return;
     $('#dlg-agent-menu').close();
@@ -1220,6 +1416,10 @@
     if (act === 'rename') {
       const name = prompt('새 이름', a.name);
       if (name) await api(`/agents/${a.id}`, { method: 'PATCH', body: { name } });
+    } else if (act === 'skills') {
+      openSkillsDialog(a.id);
+    } else if (act === 'schedules') {
+      openSchedulesDialog(a.id);
     } else if (act === 'compact') {
       if (confirm('지금까지의 대화를 짧게 요약해 두고 새 대화로 이어갑니다. 토큰 사용이 크게 줄어듭니다. 진행할까요?')) {
         toast('요약하는 중…');
@@ -1377,6 +1577,184 @@
     }
   });
 
+  // ---------- skills dialog (list · preview · edit · delete) ----------
+  const SKILL_SCOPE_LABEL = { user: '내 계정 전체', project: '이 프로젝트' };
+  let skillsAgentId = null;
+  function showSkillsList() {
+    $('#skills-list-view').hidden = false;
+    $('#skills-import-view').hidden = true;
+    $('#skills-edit-view').hidden = true;
+  }
+  function currentWorkspaceId() {
+    if (state.detail?.agent?.id === skillsAgentId) return state.detail.agent.workspace_id;
+    return state.data?.agents?.find((a) => a.id === skillsAgentId)?.workspace_id;
+  }
+  function skillsListHTML(list) {
+    if (!list.length) return `<p class="muted small">아직 만든 스킬이 없습니다.</p>`;
+    return `<div class="skills-list">${list.map((s) => `
+      <div class="skill-row">
+        <div class="skill-row-head">
+          <button type="button" class="skill-row-main" data-view="${esc(s.name)}" data-scope="${esc(s.scope)}">
+            <b><span class="skill-name">/${esc(s.name)}</span><span class="skill-scope-tag">${esc(SKILL_SCOPE_LABEL[s.scope] || s.scope)}</span></b>
+            <small>${esc(s.descriptionKo || s.description || '(설명 없음)')}</small>
+          </button>
+          <div class="skill-row-actions">
+            <button type="button" class="icon-btn" data-edit="${esc(s.name)}" data-scope="${esc(s.scope)}" aria-label="편집">${ICON.edit}</button>
+            <button type="button" class="icon-btn" data-delete="${esc(s.name)}" data-scope="${esc(s.scope)}" aria-label="삭제">${ICON.trash}</button>
+          </div>
+        </div>
+        ${s.scope === 'project' ? `<div class="skill-row-buttons"><button type="button" class="btn small" data-promote="${esc(s.name)}">내 계정 전체로 올리기</button></div>` : ''}
+      </div>`).join('')}</div>`;
+  }
+  async function refreshSkillsList() {
+    $('#skills-list').innerHTML = '<p class="muted small">불러오는 중…</p>';
+    let list = [];
+    try {
+      list = await loadSkills(skillsAgentId, true);
+    } catch (e) {
+      $('#skills-list').innerHTML = `<p class="error">${esc(e.message)}</p>`;
+      return;
+    }
+    $('#skills-list').innerHTML = skillsListHTML(list);
+    $('#skills-list').querySelectorAll('[data-view]').forEach((b) => (b.onclick = async () => {
+      try {
+        const full = await api(`/agents/${skillsAgentId}/skills/${encodeURIComponent(b.dataset.view)}?scope=${b.dataset.scope}`);
+        $('#text-title').textContent = `/${full.name}`;
+        $('#text-body').textContent = full.body || '(내용 없음)';
+        $('#dlg-text').showModal();
+      } catch (e) { toast(e.message); }
+    }));
+    $('#skills-list').querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => openSkillEdit(b.dataset.edit, b.dataset.scope)));
+    $('#skills-list').querySelectorAll('[data-promote]').forEach((b) => (b.onclick = async () => {
+      const name = b.dataset.promote;
+      if (!confirm(`"/${name}" 스킬을 내 계정 전체로 올릴까요? 이 프로젝트에서는 사라지고, 모든 프로젝트에서 보이게 됩니다.`)) return;
+      const workspaceId = currentWorkspaceId();
+      if (!workspaceId) { toast('이 에이전트의 프로젝트를 찾을 수 없습니다'); return; }
+      await importSkill({ sourceWorkspaceId: workspaceId, name, scope: 'user', move: true });
+    }));
+    $('#skills-list').querySelectorAll('[data-delete]').forEach((b) => (b.onclick = async () => {
+      const name = b.dataset.delete, scope = b.dataset.scope;
+      if (!confirm(`"/${name}" 스킬을 삭제할까요? 이 폴더의 파일이 모두 사라집니다.`)) return;
+      try {
+        await api(`/agents/${skillsAgentId}/skills/${encodeURIComponent(name)}?scope=${scope}`, { method: 'DELETE' });
+        invalidateSkills(skillsAgentId);
+        toast('스킬을 삭제했습니다');
+        refreshSkillsList();
+      } catch (e) { toast(e.message); }
+    }));
+  }
+  function openSkillEdit(name, scope) {
+    $('#skills-list-view').hidden = true;
+    $('#skills-edit-view').hidden = false;
+    $('#skill-error').hidden = true;
+    $('#skills-edit-title').textContent = name ? `/${name} 편집` : '새 스킬';
+    $('#skill-name').value = name || '';
+    $('#skill-name').disabled = !!name;
+    document.querySelectorAll('input[name="skill-scope"]').forEach((r) => (r.checked = r.value === (scope || 'user')));
+    $('#skill-desc').value = '';
+    $('#skill-body').value = '';
+    $('#skill-delete').hidden = !name;
+    $('#skill-save').dataset.name = name || '';
+    $('#skill-save').dataset.scope = scope || '';
+    if (name) {
+      api(`/agents/${skillsAgentId}/skills/${encodeURIComponent(name)}?scope=${scope}`).then((full) => {
+        $('#skill-desc').value = full.description || '';
+        $('#skill-body').value = full.body || '';
+      }).catch((e) => toast(e.message));
+    }
+  }
+  function openSkillsDialog(agentId) {
+    skillsAgentId = agentId;
+    showSkillsList();
+    $('#dlg-skills').showModal();
+    refreshSkillsList();
+  }
+  $('#skills-new').onclick = () => openSkillEdit('', 'user');
+  $('#skills-cancel').onclick = () => { showSkillsList(); refreshSkillsList(); };
+  $('#skill-save').onclick = async () => {
+    const name = $('#skill-name').value.trim();
+    const scope = document.querySelector('input[name="skill-scope"]:checked')?.value || 'user';
+    const description = $('#skill-desc').value.trim();
+    const body = $('#skill-body').value.trim();
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) { $('#skill-error').textContent = '이름은 소문자·숫자·하이픈만 사용할 수 있습니다.'; $('#skill-error').hidden = false; return; }
+    if (!description) { $('#skill-error').textContent = '설명을 입력하세요.'; $('#skill-error').hidden = false; return; }
+    if (!body) { $('#skill-error').textContent = '내용을 입력하세요.'; $('#skill-error').hidden = false; return; }
+    try {
+      await api(`/agents/${skillsAgentId}/skills/${encodeURIComponent(name)}`, { method: 'PUT', body: { scope, description, body } });
+      invalidateSkills(skillsAgentId);
+      toast('저장했습니다');
+      showSkillsList();
+      refreshSkillsList();
+    } catch (e) {
+      $('#skill-error').textContent = e.message;
+      $('#skill-error').hidden = false;
+    }
+  };
+  $('#skill-delete').onclick = async () => {
+    const name = $('#skill-save').dataset.name, scope = $('#skill-save').dataset.scope;
+    if (!name || !confirm(`"/${name}" 스킬을 삭제할까요? 이 폴더의 파일이 모두 사라집니다.`)) return;
+    try {
+      await api(`/agents/${skillsAgentId}/skills/${encodeURIComponent(name)}?scope=${scope}`, { method: 'DELETE' });
+      invalidateSkills(skillsAgentId);
+      toast('스킬을 삭제했습니다');
+      showSkillsList();
+      refreshSkillsList();
+    } catch (e) { toast(e.message); }
+  };
+  function skillsImportHTML(groups) {
+    if (!groups.length) return `<p class="muted small">가져올 수 있는 다른 프로젝트 스킬이 없습니다.</p>`;
+    return groups.map((g) => `
+      <h3 class="skills-group">${esc(g.workspaceName)}</h3>
+      <div class="skills-list">${g.skills.map((s) => `
+        <div class="skill-row">
+          <div class="skill-row-head">
+            <div class="skill-row-main">
+              <b><span class="skill-name">/${esc(s.name)}</span></b>
+              <small>${esc(s.descriptionKo || s.description || '(설명 없음)')}</small>
+            </div>
+          </div>
+          <div class="skill-row-buttons">
+            <button type="button" class="btn small" data-import="${esc(s.name)}" data-ws="${g.workspaceId}" data-scope="project">이 프로젝트로</button>
+            <button type="button" class="btn small" data-import="${esc(s.name)}" data-ws="${g.workspaceId}" data-scope="user">내 계정 전체로</button>
+          </div>
+        </div>`).join('')}</div>`).join('');
+  }
+  async function openSkillImport() {
+    $('#skills-list-view').hidden = true;
+    $('#skills-import-view').hidden = false;
+    $('#skills-import-list').innerHTML = '<p class="muted small">불러오는 중…</p>';
+    try {
+      const groups = await api(`/agents/${skillsAgentId}/skills/importable`);
+      $('#skills-import-list').innerHTML = skillsImportHTML(groups);
+      $('#skills-import-list').querySelectorAll('[data-import]').forEach((b) => (b.onclick = () => importSkill({
+        sourceWorkspaceId: Number(b.dataset.ws), name: b.dataset.import, scope: b.dataset.scope,
+      })));
+    } catch (e) {
+      $('#skills-import-list').innerHTML = `<p class="error">${esc(e.message)}</p>`;
+    }
+  }
+  async function importSkill({ sourceWorkspaceId, name, scope, move }) {
+    try {
+      await api(`/agents/${skillsAgentId}/skills/import`, { method: 'POST', body: { sourceWorkspaceId, name, scope, move } });
+    } catch (e) {
+      if (e.status === 409 && e.data?.exists) {
+        if (!confirm('같은 이름의 스킬이 이미 있습니다. 덮어쓸까요?')) return;
+        try {
+          await api(`/agents/${skillsAgentId}/skills/import`, { method: 'POST', body: { sourceWorkspaceId, name, scope, move, overwrite: true } });
+        } catch (e2) { toast(e2.message); return; }
+      } else {
+        toast(e.message);
+        return;
+      }
+    }
+    invalidateSkills(skillsAgentId);
+    toast('스킬을 가져왔습니다');
+    showSkillsList();
+    refreshSkillsList();
+  }
+  $('#skills-import').onclick = () => openSkillImport();
+  $('#skills-import-back').onclick = () => { showSkillsList(); refreshSkillsList(); };
+
   let addAgentWs = null;
   function openAddAgent(wid) {
     addAgentWs = wid;
@@ -1393,7 +1771,14 @@
   }
   function syncAgentKindForm() {
     const codex = $('#agent-kind').value === 'codex';
-    $('#claude-opts').hidden = codex;
+    $('#claude-opts').hidden = false;
+    $('#agent-pipeline-field').hidden = codex;
+    $('#auto-opts').hidden = codex || $('#agent-pipeline').value !== 'auto';
+    $('#manual-opts').hidden = !codex && $('#agent-pipeline').value === 'auto';
+    const model = $('#agent-model');
+    model.innerHTML = codex
+      ? `<option value="">기본 · ${esc(codexModelLabel(codexDefaultModel()))}</option>${codexModelOptions('')}`
+      : `<option value="">기본 (클로드 설정값)</option>${modelOptions('manual', '', null)}`;
     const perm = $('#agent-perm');
     const previous = perm.value;
     perm.innerHTML = codex
@@ -1408,8 +1793,13 @@
     try {
       const a = await api('/agents', { method: 'POST', body: {
         workspace_id: addAgentWs, kind: $('#agent-kind').value, name: $('#agent-name').value,
-        permission_mode: $('#agent-perm').value, model: $('#agent-model').value || null, effort: $('#agent-effort').value || null,
-        pipeline: $('#agent-pipeline').value, plan_model: $('#agent-plan-model').value, exec_model: $('#agent-exec-model').value,
+        permission_mode: $('#agent-perm').value,
+        model: $('#agent-kind').value === 'claude' ? ($('#agent-model').value || null) : null,
+        effort: $('#agent-kind').value === 'claude' ? ($('#agent-effort').value || null) : null,
+        codex_model: $('#agent-kind').value === 'codex' ? ($('#agent-model').value || null) : null,
+        codex_effort: $('#agent-kind').value === 'codex' ? ($('#agent-effort').value || null) : null,
+        pipeline: $('#agent-kind').value === 'codex' ? 'manual' : $('#agent-pipeline').value,
+        plan_model: $('#agent-plan-model').value, exec_model: $('#agent-exec-model').value,
         collab_mode: $('#agent-collab').checked,
       } });
       $('#dlg-agent').close();
@@ -1418,13 +1808,217 @@
     } catch (err) { toast(err.message); }
   });
 
+  // ---------- 말로 지시 (browser speech recognition; hidden when unsupported) ----------
+  let recognizer = null;
+  function setupVoice(ta) {
+    const btn = $('#mic-btn');
+    const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Speech || !btn) return;
+    btn.hidden = false;
+    let base = '';
+    const stop = () => { if (recognizer) { try { recognizer.stop(); } catch {} } };
+    btn.onclick = () => {
+      if (recognizer) { stop(); return; }
+      const rec = new Speech();
+      rec.lang = 'ko-KR';
+      rec.interimResults = true;
+      rec.continuous = false;
+      base = ta.value ? ta.value.replace(/\s+$/, '') + ' ' : '';
+      rec.onresult = (e) => {
+        let text = '';
+        for (const r of e.results) text += r[0].transcript;
+        ta.value = base + text;
+        ta.dispatchEvent(new Event('input'));
+      };
+      rec.onerror = (e) => {
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') toast('마이크 사용이 허용되지 않았습니다. 브라우저 설정에서 마이크를 허용해 주세요', 3500);
+        else if (e.error !== 'aborted' && e.error !== 'no-speech') toast('음성을 알아듣지 못했습니다. 다시 눌러 말씀해 주세요');
+      };
+      rec.onend = () => {
+        recognizer = null;
+        btn.classList.remove('listening');
+        btn.setAttribute('aria-pressed', 'false');
+        ta.placeholder = '지시를 입력하세요…';
+        ta.focus();
+      };
+      recognizer = rec;
+      btn.classList.add('listening');
+      btn.setAttribute('aria-pressed', 'true');
+      ta.placeholder = '듣고 있습니다… 말씀하세요';
+      try { rec.start(); } catch (e) { recognizer = null; btn.classList.remove('listening'); toast('음성 인식을 시작하지 못했습니다'); }
+    };
+  }
+
+  // ---------- 예약 실행 ----------
+  let schedAgentId = null;
+  let schedEditing = null;
+  const DAY_LABELS = ['일', '월', '화', '수', '목', '금', '토'];
+  const fmtNext = (ts) => {
+    if (!ts) return '';
+    const d = new Date(ts);
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const diff = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - today) / 86400000);
+    const when = diff === 0 ? '오늘' : diff === 1 ? '내일' : `${d.getMonth() + 1}/${d.getDate()}(${DAY_LABELS[d.getDay()]})`;
+    return `${when} ${clock(ts)}`;
+  };
+  function showSchedList() { $('#sched-list-view').hidden = false; $('#sched-edit-view').hidden = true; }
+  async function refreshSchedules() {
+    if (!schedAgentId) return;
+    const host = $('#sched-list');
+    let data;
+    try { data = await api(`/agents/${schedAgentId}/schedules`); } catch (e) { host.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
+    if (!data.schedules.length) { host.innerHTML = '<div class="row-empty">아직 예약이 없습니다. 아래에서 추가하세요.</div>'; return; }
+    host.innerHTML = data.schedules.map((sc) => `
+      <div class="sched-row ${sc.enabled ? '' : 'off'}" data-id="${sc.id}">
+        <label class="switch" aria-label="예약 켜기/끄기"><input type="checkbox" data-toggle ${sc.enabled ? 'checked' : ''}><span></span></label>
+        <button type="button" class="sched-main" data-edit>
+          <b class="mono">${esc(sc.time)}</b><span class="sched-days">${esc(sc.days_label)}</span>
+          <small>${esc(sc.text.replace(/\s+/g, ' ').slice(0, 80))}</small>
+          <small class="sched-next">${sc.enabled ? (sc.next_at ? `다음 실행 ${fmtNext(sc.next_at)}` : '') : '꺼짐'}${sc.last_run_at ? ` · 마지막 ${ago(sc.last_run_at)}` : ''}</small>
+        </button>
+        <button type="button" class="tb" data-run>지금 실행</button>
+      </div>`).join('');
+    host.querySelectorAll('.sched-row').forEach((row) => {
+      const id = Number(row.dataset.id);
+      const sc = data.schedules.find((x) => x.id === id);
+      row.querySelector('[data-toggle]').onchange = async (e) => {
+        try { await api(`/schedules/${id}`, { method: 'PATCH', body: { enabled: e.target.checked } }); refreshSchedules(); } catch (err) { toast(err.message); }
+      };
+      row.querySelector('[data-edit]').onclick = () => openSchedEdit(sc);
+      row.querySelector('[data-run]').onclick = async () => {
+        if (!confirm('이 예약 지시를 지금 바로 보낼까요?')) return;
+        try { await api(`/schedules/${id}/run`, { method: 'POST' }); toast('지시를 보냈습니다'); $('#dlg-schedules').close(); } catch (err) { toast(err.message); }
+      };
+    });
+  }
+  function renderDayChips(selected) {
+    const box = $('#sched-days');
+    box.innerHTML = DAY_LABELS.map((l, i) => `<button type="button" class="day ${selected.has(i) ? 'on' : ''}" data-day="${i}" aria-pressed="${selected.has(i)}">${l}</button>`).join('');
+    box.querySelectorAll('.day').forEach((b) => (b.onclick = () => {
+      const on = !b.classList.contains('on');
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', String(on));
+    }));
+  }
+  const selectedDays = () => [...$('#sched-days').querySelectorAll('.day.on')].map((b) => Number(b.dataset.day));
+  function openSchedEdit(sc) {
+    schedEditing = sc || null;
+    $('#sched-edit-title').textContent = sc ? '예약 수정' : '예약 추가';
+    $('#sched-time').value = sc ? sc.time : '09:00';
+    $('#sched-text').value = sc ? sc.text : '';
+    $('#sched-delete').hidden = !sc;
+    $('#sched-error').hidden = true;
+    renderDayChips(new Set(sc && sc.days ? sc.days.split(',').map(Number) : [0, 1, 2, 3, 4, 5, 6]));
+    $('#sched-list-view').hidden = true;
+    $('#sched-edit-view').hidden = false;
+  }
+  function openSchedulesDialog(agentId) {
+    schedAgentId = agentId;
+    showSchedList();
+    $('#sched-list').innerHTML = '<div class="row-empty">불러오는 중…</div>';
+    $('#dlg-schedules').showModal();
+    refreshSchedules();
+  }
+  $('#sched-new').onclick = () => openSchedEdit(null);
+  $('#sched-cancel').onclick = () => { showSchedList(); refreshSchedules(); };
+  $('#sched-save').onclick = async () => {
+    const body = { time: $('#sched-time').value, text: $('#sched-text').value.trim(), days: selectedDays() };
+    const err = $('#sched-error');
+    if (!body.text) { err.textContent = '지시 내용을 입력하세요.'; err.hidden = false; return; }
+    if (!body.time) { err.textContent = '시각을 고르세요.'; err.hidden = false; return; }
+    if (!body.days.length) { err.textContent = '요일을 하나 이상 고르세요.'; err.hidden = false; return; }
+    try {
+      if (schedEditing) await api(`/schedules/${schedEditing.id}`, { method: 'PATCH', body });
+      else await api(`/agents/${schedAgentId}/schedules`, { method: 'POST', body });
+      toast(schedEditing ? '예약을 고쳤습니다' : '예약했습니다');
+      showSchedList();
+      refreshSchedules();
+    } catch (e) { err.textContent = e.message; err.hidden = false; }
+  };
+  $('#sched-delete').onclick = async () => {
+    if (!schedEditing || !confirm('이 예약을 삭제할까요?')) return;
+    try { await api(`/schedules/${schedEditing.id}`, { method: 'DELETE' }); toast('삭제했습니다'); showSchedList(); refreshSchedules(); } catch (e) { toast(e.message); }
+  };
+
+  // ---------- 오늘 한 일 요약 ----------
+  function digestCardHTML(d) {
+    if (!d) return '';
+    const t = d.totals;
+    if (!d.agents.length) return `<span class="dg-k">오늘 한 일</span><span class="dg-v">아직 지시한 작업이 없습니다</span>${ICON.chev}`;
+    const bits = [`지시 ${t.requests}건`, t.files ? `파일 ${t.files}개 수정` : null, t.errors ? `오류 ${t.errors}건` : null, fmtUsd(t.cost)].filter(Boolean).join(' · ');
+    return `<span class="dg-k">오늘 한 일</span><span class="dg-v"><b>에이전트 ${d.agents.length}개</b> · ${esc(bits)}</span>${ICON.chev}`;
+  }
+  async function loadDigestCard() {
+    try {
+      state.digest = await api('/digest');
+      const card = $('#digest-card');
+      if (card) { card.innerHTML = digestCardHTML(state.digest); card.hidden = false; }
+    } catch {}
+  }
+  let digestDate = null;
+  function digestBodyHTML(d) {
+    const t = d.totals;
+    if (!d.agents.length) return '<div class="row-empty">이날은 지시한 작업이 없었습니다.</div>';
+    const head = `<div class="dg-totals">
+      <div><b>${t.requests}</b><span>지시</span></div>
+      <div><b>${t.files}</b><span>파일 수정</span></div>
+      <div><b>${t.errors}</b><span>오류</span></div>
+      <div><b>${t.fresh ? fmtTokens(t.fresh) : '0'}</b><span>새 토큰</span></div>
+      <div><b>${fmtUsd(t.cost) || '—'}</b><span>환산 비용</span></div>
+    </div>`;
+    const rows = d.agents.map((a) => `
+      <button type="button" class="dg-row" data-agent="${a.id}">
+        <div class="dg-row-h"><span class="kind ${a.kind}">${kindLabel[a.kind] || a.kind}</span><strong>${esc(a.name)}</strong><small>${esc(a.workspace)}</small></div>
+        <div class="dg-row-m">지시 ${a.requests}건${a.files ? ` · 파일 ${a.files}개` : ''}${a.errors ? ` · 오류 ${a.errors}건` : ''}${a.fresh ? ` · 새 토큰 ${fmtTokens(a.fresh)}` : ''}${fmtUsd(a.cost) ? ` · ${fmtUsd(a.cost)}` : ''}</div>
+        ${a.last_reply ? `<div class="dg-row-s">${esc(a.last_reply)}</div>` : ''}
+      </button>`).join('');
+    return head + rows;
+  }
+  async function openDigest(date) {
+    digestDate = date || null;
+    const dlg = $('#dlg-digest');
+    $('#digest-body').innerHTML = '<div class="row-empty">불러오는 중…</div>';
+    if (!dlg.open) dlg.showModal();
+    try {
+      const d = await api(`/digest${digestDate ? `?date=${encodeURIComponent(digestDate)}` : ''}`);
+      digestDate = d.date;
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const day = new Date(`${d.date}T00:00:00`);
+      const label = day.getTime() === today.getTime() ? '오늘' : day.getTime() === today.getTime() - 86400000 ? '어제' : `${day.getMonth() + 1}월 ${day.getDate()}일`;
+      $('#digest-title').textContent = `${label} 한 일`;
+      $('#digest-next').disabled = day.getTime() >= today.getTime();
+      $('#digest-body').innerHTML = digestBodyHTML(d);
+      $('#digest-body').querySelectorAll('[data-agent]').forEach((el) => (el.onclick = () => { dlg.close(); go({ name: 'agent', id: Number(el.dataset.agent) }); }));
+    } catch (e) {
+      $('#digest-body').innerHTML = `<p class="error">${esc(e.message)}</p>`;
+    }
+  }
+  const shiftDigest = (days) => {
+    const d = new Date(`${digestDate}T00:00:00`);
+    d.setDate(d.getDate() + days);
+    openDigest(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`);
+  };
+  $('#digest-prev').onclick = () => shiftDigest(-1);
+  $('#digest-next').onclick = () => shiftDigest(1);
+
   // ---------- settings & push ----------
   $('#btn-settings').onclick = () => {
     $('#set-host').textContent = state.data?.computer.name || location.host;
     $('#set-claude').textContent = state.data?.tools.claude || '';
     $('#set-codex').textContent = state.data?.tools.codex ? '설치됨' : '미설치';
     updatePushStatus();
+    api('/digest').then((d) => { $('#digest-enabled').checked = !!d.settings.enabled; $('#digest-time').value = d.settings.time; }).catch(() => {});
     $('#dlg-settings').showModal();
+  };
+  const saveDigestSettings = async () => {
+    try { await api('/digest/settings', { method: 'PATCH', body: { enabled: $('#digest-enabled').checked, time: $('#digest-time').value } }); toast('저장했습니다'); }
+    catch (e) { toast(e.message); }
+  };
+  $('#digest-enabled').onchange = saveDigestSettings;
+  $('#digest-time').onchange = () => { if ($('#digest-time').value) saveDigestSettings(); };
+  $('#btn-digest-view').onclick = () => { $('#dlg-settings').close(); openDigest(); };
+  $('#btn-digest-send').onclick = async () => {
+    try { const r = await api('/digest/send', { method: 'POST' }); toast(`요약 알림 발송 (구독 ${r.subscriptions}개)`); } catch (e) { toast(e.message); }
   };
   $('#btn-logout').onclick = () => { localStorage.removeItem('ar_token'); location.reload(); };
   $('#btn-push').onclick = enablePush;
@@ -1457,6 +2051,14 @@
   // ---------- boot ----------
   async function boot() {
     state.meta = await fetch('/api/meta').then((r) => r.json()).catch(() => ({}));
+    // A link that carries ?token= (first-time setup from the PC) logs this phone in without typing.
+    const bootQuery = new URLSearchParams(location.search);
+    if (bootQuery.get('token')) {
+      state.token = bootQuery.get('token');
+      localStorage.setItem('ar_token', state.token);
+      bootQuery.delete('token');
+      history.replaceState(null, '', `${location.pathname}${bootQuery.toString() ? `?${bootQuery}` : ''}`);
+    }
     if (!state.token) return openLogin();
     if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) navigator.serviceWorker.register('/sw.js').catch(() => {});
     await refreshState(true);
@@ -1466,6 +2068,7 @@
     const deepLinkId = q.get('agent') ? { name: 'agent', id: Number(q.get('agent')) }
       : q.get('workspace') ? { name: 'workspace', id: Number(q.get('workspace')) }
       : null;
+    if (q.get('digest')) { history.replaceState({ name: 'home' }, '', '/'); render(); openDigest(q.get('digest')); return; }
     if (deepLinkId) {
       // A cold start (push notification tap, PWA relaunch) lands directly on this URL with no
       // history beneath it, so the phone's back gesture has nowhere to go but out of the app.
