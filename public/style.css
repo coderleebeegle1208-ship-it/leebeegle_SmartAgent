@@ -649,3 +649,45 @@ dialog.sheet { position: fixed; inset: auto 0 0 0; margin: 0 auto; width: min(10
 /* ---------- 읽어주기 ---------- */
 .speak-btn { margin-left: 6px; border: 0; background: none; color: var(--ink-3); padding: 0; vertical-align: middle; cursor: pointer; }
 .speak-btn:active { color: var(--ink); }
+
+/* ---------- 위험 등급 색깔 (승인 카드) ---------- */
+.approve .level-pill { display: inline-flex; align-items: center; gap: 5px; margin-right: 6px; padding: 1px 8px 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: 0; }
+.approve .level-pill i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.approve .level-pill.safe { background: var(--ok-bg); color: var(--ok-ink); }
+.approve .level-pill.caution { background: var(--warn-bg); color: var(--warn-ink); }
+.approve .level-pill.danger { background: #ffe5e5; color: #b71c1c; }
+.approve.lvl-safe { background: #F3FAF6; border-color: #BFE3CF; }
+.approve.lvl-safe .k { color: var(--ok-ink); }
+.approve.lvl-caution { background: var(--attn-bg); border-color: var(--attn-line); }
+.approve.lvl-danger { background: #fff5f5; border-color: #e5484d; }
+.approve.lvl-danger .k { color: #c62828; }
+.approve .level-note { margin: 6px 0 2px; font-size: 12px; color: var(--ink-3); line-height: 1.4; }
+
+/* ---------- 진행률 ---------- */
+.progress { flex-direction: column; align-items: stretch; gap: 6px; }
+.progress .progress-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.progress .spin[hidden] { display: none; }
+.progress .progress-bar { height: 6px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.progress .progress-bar i { display: block; height: 100%; width: 0; border-radius: 999px; background: var(--accent); transition: width .6s ease; }
+.progress.done { border-color: #BFE3CF; background: #F3FAF6; }
+.progress.done .progress-bar i { background: var(--ok); }
+.progress.failed { border-color: #f5b5b5; background: #fff5f5; }
+.progress.failed .progress-bar i { background: var(--danger); }
+#progress-dismiss { width: 26px; padding: 0; }
+.row .row-progress { margin-top: 5px; height: 4px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.row .row-progress i { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+
+/* ---------- 전·후 비교 ---------- */
+.msg.image.compare { max-width: 100%; }
+.msg.image.compare .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); }
+.msg.image.compare .image-open { position: relative; background: #fff; }
+.msg.image.compare img { max-height: 360px; }
+.msg.image .pane-label { position: absolute; top: 6px; left: 6px; z-index: 1; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 700; line-height: 1.6; color: #fff; background: rgba(15,16,17,.62); }
+.msg.image.compare .image-open:last-child .pane-label { background: var(--accent); }
+.msg.image.before { opacity: .85; }
+.msg.image.before figcaption::before { content: "전 · "; color: var(--ink-3); }
+
+/* ---------- 텔레그램 설정 ---------- */
+.tg-steps { margin: 4px 0 8px; padding-left: 18px; line-height: 1.6; }
+.tg-pair { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 6px 0 10px; padding: 10px 12px; border-radius: var(--r-m); background: var(--accent-bg); font-size: 13px; color: var(--accent-ink); }
+.tg-pair b { font-size: 20px; letter-spacing: .12em; }

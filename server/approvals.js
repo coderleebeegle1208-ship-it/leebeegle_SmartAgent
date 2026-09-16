@@ -34,6 +34,23 @@ export function isSafeWhenUnattended(toolName, input, workspacePath) {
   return false;
 }
 
+// 위험 등급: 초록(safe)=읽기만 함, 노랑(caution)=작업 폴더 안을 바꿈(되돌리기 가능), 빨강(danger)=되돌릴 수 없음.
+// 질문(AskUserQuestion)은 등급 없음(null). 카드 색깔·알림 제목·텔레그램 문구가 모두 이 값을 쓴다.
+export const LEVEL_LABEL = {
+  safe: { icon: '🟢', title: '안전', note: '읽기만 하는 요청입니다. 파일이 바뀌지 않습니다.' },
+  caution: { icon: '🟡', title: '주의', note: '작업 폴더 안을 바꾸는 요청입니다. 마음에 안 들면 되돌리기로 복구할 수 있습니다.' },
+  danger: { icon: '🔴', title: '위험', note: '작업 폴더 밖을 바꾸거나 되돌릴 수 없는 요청입니다. 허용하면 되돌리기로 복구할 수 없습니다.' },
+};
+export function riskLevel(toolName, input, workspacePath, risk = null) {
+  if (toolName === 'AskUserQuestion' || toolName === 'ExitPlanMode') return null;
+  if (risk === 'outside' || outsideRisk(toolName, input, workspacePath)) return 'danger';
+  if (isSafeWhenUnattended(toolName, input, workspacePath)) {
+    // 작업 폴더 안 편집은 자리 비움 자동 허용 기준으로는 "안전"이지만 파일이 바뀌므로 색은 노랑.
+    return ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'].includes(toolName) ? 'caution' : 'safe';
+  }
+  return 'caution';
+}
+
 function clearTimers(id) {
   for (const t of timers.get(id) || []) clearTimeout(t);
   timers.delete(id);
@@ -118,7 +135,8 @@ export function requestApproval(agentId, toolName, input, opts = {}) {
     return { approval, promise: Promise.resolve({ behavior: 'allow', updatedInput: input }) };
   }
 
-  const approval = Approvals.create(agentId, toolName, input, risk);
+  const level = riskLevel(toolName, input, workspace?.path, risk);
+  const approval = Approvals.create(agentId, toolName, input, risk, level);
   // Questions and outside-the-workspace changes still need a human even under blanket approval;
   // everything else sails through.
   const auto = toolName !== 'AskUserQuestion' && !risk ? blanket.get(agentId) : null;
@@ -135,13 +153,16 @@ export function requestApproval(agentId, toolName, input, opts = {}) {
   armUnattended(approval, agent, toolName, input, risk);
 
   Agents.update(agentId, { status: 'needs_attention' });
-  Messages.add(agentId, 'system', `${risk ? '⚠ 작업 폴더 밖 변경 · ' : ''}승인 요청 · ${toolName}: ${summarizeInput(toolName, input)}`, { approval_id: approval.id, ...(risk ? { risk } : {}) });
+  Messages.add(agentId, 'system', `${risk ? '⚠ 작업 폴더 밖 변경 · ' : ''}승인 요청 · ${toolName}: ${summarizeInput(toolName, input)}`, { approval_id: approval.id, ...(risk ? { risk } : {}), ...(level ? { level } : {}) });
   emit('approval.requested', { approval, agent: Agents.get(agentId) });
+  const lv = level ? LEVEL_LABEL[level] : null;
   sendPush({
-    title: `${agent.name} · ${risk ? '⚠ 폴더 밖 변경 확인' : '승인 필요'}`,
+    title: `${lv ? `${lv.icon} ` : ''}${agent.name} · ${toolName === 'AskUserQuestion' ? '질문에 답해주세요' : risk ? '위험 · 폴더 밖 변경 확인' : lv ? `${lv.title} · 승인 필요` : '승인 필요'}`,
     body: `${toolName}: ${summarizeInput(toolName, input)}`.slice(0, 180),
     url: `/?agent=${agentId}`,
     tag: `approval-${approval.id}`,
+    // 메신저(텔레그램)에서는 버튼으로 바로 답할 수 있게 승인 정보를 함께 보낸다.
+    approval: { id: approval.id, tool: toolName, level, risk, question: toolName === 'AskUserQuestion' },
   }).catch(() => {});
 
   return { approval, promise };
@@ -185,8 +206,8 @@ export function resolveApproval(id, decision, extra = {}) {
     decision === 'allow'
       ? extra.note
         ? `자동 허용 · ${approval.tool_name} · ${extra.note}`
-        : `승인함 · ${approval.tool_name}${extra.scope === 'run' ? ' · 이번 작업의 남은 요청도 모두 허용' : ''}`
-      : `거부함 · ${approval.tool_name}${extra.message ? ` (${extra.message})` : ''}`,
+        : `승인함 · ${approval.tool_name}${extra.scope === 'run' ? ' · 이번 작업의 남은 요청도 모두 허용' : ''}${extra.via ? ` · ${extra.via}에서` : ''}`
+      : `거부함 · ${approval.tool_name}${extra.message ? ` (${extra.message})` : ''}${extra.via ? ` · ${extra.via}에서` : ''}`,
     { approval_id: id }
   );
   emit('approval.resolved', { approval: updated, agent });

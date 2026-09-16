@@ -67,6 +67,10 @@ export function loadConfig() {
     cfg.planBudgetUsd = 0; // USD ceiling for the plan stage (Fable); 0 = no cap. Triage already
     changed = true;        // decides whether a plan runs at all, so quality shouldn't be capped once it does.
   }
+  if (cfg.publicUrl === undefined) {
+    cfg.publicUrl = ''; // 폰에서 여는 주소(예: https://xxx.ts.net). 텔레그램 "앱에서 답하기" 버튼이 쓴다
+    changed = true;
+  }
   if (!cfg.pushSubject) {
     cfg.pushSubject = 'mailto:admin@localhost';
     changed = true;

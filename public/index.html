@@ -232,6 +232,42 @@
         <button class="btn" id="btn-digest-send">지금 알림 보내기</button>
       </div>
       <hr>
+      <h3>방해금지 시간</h3>
+      <p class="muted small">이 시간에는 폰 알림을 참았다가, 끝나는 시각에 "밤사이 보고 N건" 한 장으로 모아서 보냅니다. 안전한 승인 요청은 자리 비움 규칙대로 알아서 진행되고, 위험한 요청은 아침에 보고 결정하면 됩니다.</p>
+      <div class="row-flex">
+        <label class="check" style="flex:1"><input type="checkbox" id="quiet-enabled"> 알림 참기</label>
+        <input type="time" id="quiet-start" class="time-input" aria-label="시작 시각">
+        <span class="muted small">~</span>
+        <input type="time" id="quiet-end" class="time-input" aria-label="끝 시각">
+      </div>
+      <p class="muted small" id="quiet-status"></p>
+      <hr>
+      <h3>텔레그램으로 받기</h3>
+      <p class="muted small">앱을 열지 않아도 승인 요청과 완료 보고가 텔레그램으로 오고, 버튼으로 바로 허용·거부하거나 답장으로 새 지시를 보낼 수 있습니다.</p>
+      <div id="tg-setup">
+        <ol class="muted small tg-steps">
+          <li>텔레그램에서 <b>@BotFather</b>를 찾아 <b>/newbot</b>을 보내고 이름을 정합니다.</li>
+          <li>BotFather가 주는 긴 토큰을 아래에 붙여넣고 "연결"을 누릅니다.</li>
+        </ol>
+        <div class="row-flex">
+          <input id="tg-token" class="mono" placeholder="123456789:AAxxxxxxxx…" autocomplete="off" style="flex:1">
+          <button class="btn primary" id="btn-tg-connect">연결</button>
+        </div>
+      </div>
+      <div id="tg-linked" hidden>
+        <div class="kv"><span>봇</span><span id="tg-bot" class="mono"></span></div>
+        <p class="muted small" id="tg-state"></p>
+        <div id="tg-pair" class="tg-pair" hidden>
+          <span>내 봇에게 이 번호를 보내주세요</span>
+          <b id="tg-pair-code" class="mono"></b>
+        </div>
+        <div class="row-flex">
+          <button class="btn" id="btn-tg-test">테스트</button>
+          <div class="spacer"></div>
+          <button class="btn danger" id="btn-tg-unlink">연결 끊기</button>
+        </div>
+      </div>
+      <hr>
       <h3>보고 읽어주기</h3>
       <p class="muted small">작업이 끝나면 완료 보고를 폰이 소리 내어 읽어줍니다. 이동 중에 화면을 보지 않아도 됩니다. 말풍선의 스피커 버튼으로 골라 들을 수도 있습니다.</p>
       <label class="check"><input type="checkbox" id="tts-enabled"> 완료 보고 자동으로 읽어주기</label>

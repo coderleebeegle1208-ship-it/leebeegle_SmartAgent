@@ -190,6 +190,16 @@
 - 진행 바 `#progress`(composer 안, 승인 카드 아래): 스피너 + 현재 단계("난이도 판단 중" / "계획 세우는 중" / "Sonnet 최신 실행 중" / "승인을 기다리는 중") + 마지막 사용자 메시지 기준 경과 시간(1초 갱신). `renderAgentHead → updateProgress`가 running 여부로 켜고 끈다.
 - 검증(agent 6): README 편집 + CHANGELOG 생성 작업에서 진행 바 "Sonnet 최신 실행 중 · 14초", 완료 후 요약 "생성됨 파일 1개, 편집됨 파일 1개, 사용한 도구 1개 +20 -5", 사용량 "새 토큰 4.2k · 다시 읽기 163.1k". 테스트 23/23.
 
+
+## 추가 완료 (2026-09-17, 5가지: 위험 등급 색깔 · 방해금지 시간 · 진행률 · 전후 비교 · 텔레그램)
+
+- 위험 등급: `approvals.js`의 `riskLevel()` → `safe`(읽기만) / `caution`(작업 폴더 안 변경, 되돌리기 가능) / `danger`(폴더 밖·파괴적, `risk='outside'`와 같은 조건) / 질문은 null. `approvals.level` 컬럼에 저장, 푸시 제목에 🟢🟡🔴, 승인 카드에 `.lvl-*` 색과 `.level-pill`. `resolveApproval`의 `extra.via`가 시스템 줄에 "· 텔레그램에서"를 붙인다.
+- 방해금지: `server/quiet.js`. settings `quiet_enabled/quiet_start/quiet_end`, 참아 둔 알림은 `quiet_held`(JSON). `push.js`의 `sendPush`가 단일 관문이 됐다: 방해금지면 `holdNotification`, 아니면 웹 푸시 + 등록된 sink(텔레그램). `{ urgent: true }`는 통과(푸시 테스트). 스케줄러 `flushHeldIfMorning`이 창이 끝나면 "밤사이 보고 N건" 한 장으로 보낸다. API `GET|PATCH /api/quiet`. 승인 요청도 참는다(안전한 건 자리 비움 규칙이 20분 뒤 허용).
+- 진행률: `server/progress.js`. MCP 도구 `mcp__approver__progress { percent, label, log_file, done }`. `log_file`을 주면 서버가 30초마다 끝 8KB를 읽어 마지막 "NN%" 또는 "n/m"을 찾고(`parseProgress`), 마지막 줄에 done/완료가 있고 진행 표시가 없으면 완료 → 시스템 줄 + 푸시. 에이전트가 준 percent는 `finish()`에서 지워지고 로그 감시는 턴이 끝나도 남는다. `agent.progress`(agentView) + `progress.updated` 이벤트, 폰 `#progress`에 막대·남은 시간(ETA)·✕(DELETE `/api/agents/:id/progress`), 홈 카드에 얇은 막대. `style.js`에 긴 작업이면 로그 경로를 이 도구에 넘기라고 명시.
+- 전후 비교: capture 도구에 `phase: 'before'|'after'`. `/internal/capture`가 같은 source의 직전 캡처(`previousCapture`: before 표시가 있거나 24시간 안)를 `meta.before`로 붙이고, 앱이 `.msg.image.compare`로 전/후를 나란히 그린다. before만 찍힌 카드는 "전 · " 접두어.
+- 텔레그램: `server/telegram.js`. BotFather 토큰 → `POST /api/telegram` → getMe 확인 → 6자리 연결 번호(settings `tg_pair_code`) → 봇에게 보내면 `tg_chat_id` 고정. long polling(getUpdates 30s)이며 테스트(NODE_TEST_CONTEXT)에서는 폴링을 띄우지 않는다. 승인 알림은 인라인 버튼(허용/거부/이번 작업 모두 허용, 위험이면 모두 허용 없음) → `handleCallbackData`. 질문은 "앱에서 답하기" 링크(`cfg.publicUrl`, data/config.json에 tailscale 주소 넣어 둠). 일반 답장은 `handleText`: 마지막 알림을 보낸 에이전트(`tg_last_agent`)에게 지시, 바쁘면 줄 세우기. `/list`, `/use 번호`, `/help`. 완료 보고는 `payload.long`으로 전문(3500자)을 보낸다. 카카오톡은 개인용 공식 API가 "나에게 보내기" 단방향뿐이라 양방향은 불가 — 필요하면 단방향만 추가 가능.
+- 테스트 76/76. 임시 서버(포트 3999, 별도 config/DB)에서 승인 3등급·진행률·전후 비교·설정 화면 캡처로 확인.
+
 ## 변경한 파일
 
 - `server/db.js`

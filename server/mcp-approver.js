@@ -64,6 +64,21 @@ const CAPTURE_TOOL = {
       full_page: { type: 'boolean', description: 'Use a tall viewport (2400px) to show more of the page' },
       wait_ms: { type: 'number', description: 'Extra render time before the shot (default 1500)' },
       fit_width_px: { type: 'number', description: "Use when the target's natural CSS width (e.g. a print poster laid out at 1600px) is wider than `width`. The page is scaled down to fit so the whole thing shows instead of being cropped to its left edge. Set this to the target's actual CSS pixel width." },
+      phase: { type: 'string', enum: ['before', 'after'], description: "For visual changes: capture the same url/file with phase 'before' BEFORE editing and 'after' when done. The phone then shows the two side by side (전·후 비교)." },
+    },
+  },
+};
+
+const PROGRESS_TOOL = {
+  name: 'progress',
+  description: "Shows a progress bar on the owner's phone for a long task. Two ways: (1) pass `percent` (0-100) and a short Korean `label` each time a step finishes; (2) for a job you started in the background with its output redirected to a log file, pass `log_file` once — the server then tails that file every 30 s, reads the latest 'NN%' or 'n/m' it prints, shows it on the phone even after your turn ends, and notifies the owner when it reaches 100% or prints done/완료. Prefer (2) for video/audio generation, rendering, uploads, batches.",
+  inputSchema: {
+    type: 'object',
+    properties: {
+      percent: { type: 'number', description: '0-100' },
+      label: { type: 'string', description: 'Short Korean name of the task, e.g. "쇼츠 영상 만드는 중"' },
+      log_file: { type: 'string', description: 'Path to the log file of a background job (absolute, or relative to the workspace)' },
+      done: { type: 'boolean', description: 'true when the task is finished' },
     },
   },
 };
@@ -113,6 +128,7 @@ rl.on('line', async (line) => {
             },
           },
           CAPTURE_TOOL,
+          PROGRESS_TOOL,
           RESTART_TOOL,
         ],
       },
@@ -128,6 +144,20 @@ rl.on('line', async (line) => {
       send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: '재시작을 예약했습니다. 이 답변을 마치면 서버가 5초 안에 자동으로 다시 켜집니다. 더 이상 명령을 실행하지 말고 대표에게 "잠시 후 앱을 새로고침하면 됩니다"라고만 알리세요.' }] } });
     } catch (err) {
       send({ jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text: `재시작 예약 실패: ${err.message}` }] } });
+    }
+  } else if (method === 'tools/call' && params?.name === 'progress') {
+    try {
+      const res = await fetch(`${URL_BASE}/internal/progress`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ agentId: Number(AGENT_ID), ...(params?.arguments || {}) }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `progress failed (${res.status})`);
+      const p = data.progress || {};
+      send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: p.log_file ? `폰에 진행률을 띄웠습니다 (${p.label}). 로그 파일을 서버가 계속 지켜보니 더 기다리거나 확인하지 말고 턴을 끝내세요.` : `진행률 ${p.percent}% 표시했습니다.` }] } });
+    } catch (err) {
+      send({ jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text: `진행률 표시 실패: ${err.message}` }] } });
     }
   } else if (method === 'tools/call' && params?.name === 'capture') {
     const args = params?.arguments || {};

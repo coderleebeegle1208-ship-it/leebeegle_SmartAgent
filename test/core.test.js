@@ -1168,3 +1168,165 @@ test('phone UI wires backup, saved prompts and the period digest', () => {
   assert.match(js, /period=month/);
   assert.match(js, /api\('\/backup', \{ method: 'POST' \}\)/);
 });
+
+// ---------- 위험 등급 · 방해금지 · 진행률 · 전후 비교 · 텔레그램 ----------
+const { riskLevel, LEVEL_LABEL } = await import('../server/approvals.js');
+const { inQuietWindow, saveQuietSettings, quietSettings, isQuietNow, holdNotification, heldNotifications, heldSummary, clearHeld } = await import('../server/quiet.js');
+const { sendPush } = await import('../server/push.js');
+const { flushHeldIfMorning } = await import('../server/scheduler.js');
+const { parseProgress, setProgress, getProgress, clearProgress, tickProgress } = await import('../server/progress.js');
+const { handleCallbackData, handleText, telegramStatus, unlinkTelegram } = await import('../server/telegram.js');
+const { Settings: KV } = await import('../server/db.js');
+
+test('risk level: green for reads, yellow for undoable edits inside the workspace, red for outside/destructive, none for questions', () => {
+  const wsPath = path.join(os.tmpdir(), `lvl-ws-${process.pid}`);
+  assert.equal(riskLevel('Read', { file_path: 'C:/anywhere/x.txt' }, wsPath), 'safe');
+  assert.equal(riskLevel('Bash', { command: 'git status && ls' }, wsPath), 'safe');
+  assert.equal(riskLevel('Edit', { file_path: path.join(wsPath, 'a.js'), old_string: 'a', new_string: 'b' }, wsPath), 'caution');
+  assert.equal(riskLevel('Bash', { command: 'npm install' }, wsPath), 'caution', 'unknown command inside the workspace');
+  assert.equal(riskLevel('Write', { file_path: path.join(os.tmpdir(), 'elsewhere.txt') }, wsPath), 'danger');
+  assert.equal(riskLevel('Bash', { command: 'shutdown /s' }, wsPath), 'danger');
+  assert.equal(riskLevel('Bash', { command: 'ls' }, wsPath, 'outside'), 'danger', 'an explicit outside flag wins');
+  assert.equal(riskLevel('AskUserQuestion', { questions: [] }, wsPath), null);
+  for (const k of ['safe', 'caution', 'danger']) assert.ok(LEVEL_LABEL[k].title && LEVEL_LABEL[k].note);
+  // 저장·알림까지 이어지는지
+  const ws = Workspaces.create('lvl-ws', wsPath);
+  const agent = Agents.create(ws.id, 'claude', '등급봇');
+  const r = requestApproval(agent.id, 'Edit', { file_path: path.join(wsPath, 'a.js') });
+  assert.equal(Approvals.get(r.approval.id).level, 'caution');
+  const d = requestApproval(agent.id, 'Bash', { command: `rm -rf ${path.join(os.tmpdir(), 'zzz')}` });
+  assert.equal(Approvals.get(d.approval.id).level, 'danger');
+  assert.equal(Approvals.get(d.approval.id).risk, 'outside');
+  resolveApproval(r.approval.id, 'allow'); resolveApproval(d.approval.id, 'deny');
+  Agents.remove(agent.id); Workspaces.remove(ws.id);
+});
+
+test('quiet hours: overnight window, notifications are held and flushed as one morning summary', async () => {
+  const at = (h, m = 0) => { const d = new Date(2026, 8, 17, h, m); return d; };
+  assert.equal(inQuietWindow(at(23, 30), '23:00', '08:00'), true);
+  assert.equal(inQuietWindow(at(2), '23:00', '08:00'), true);
+  assert.equal(inQuietWindow(at(8), '23:00', '08:00'), false, 'end is exclusive');
+  assert.equal(inQuietWindow(at(12), '23:00', '08:00'), false);
+  assert.equal(inQuietWindow(at(13), '12:00', '14:00'), true, 'same-day window');
+  assert.equal(inQuietWindow(at(13), '13:00', '13:00'), false, 'empty window never quiet');
+  assert.throws(() => saveQuietSettings({ start: '25:00' }));
+  assert.equal(quietSettings().enabled, false, 'off by default');
+  // 지금 시각을 포함하는 창을 만들어 실제 sendPush가 참는지
+  const now = new Date();
+  const hh = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const start = new Date(now.getTime() - 60 * 60 * 1000), end = new Date(now.getTime() + 60 * 60 * 1000);
+  saveQuietSettings({ enabled: true, start: hh(start), end: hh(end) });
+  assert.equal(isQuietNow(), true);
+  clearHeld();
+  const r1 = await sendPush({ title: '🟡 등급봇 · 주의 · 승인 필요', body: 'Edit: a.js', url: '/?agent=1' });
+  const r2 = await sendPush({ title: '등급봇 · 완료', body: '끝났습니다', url: '/?agent=1' });
+  assert.equal(r1.held && r2.held, true);
+  assert.equal(heldNotifications().length, 2);
+  assert.equal(flushHeldIfMorning(), false, 'still quiet: nothing sent');
+  const urgent = await sendPush({ title: 'test', body: 'x' }, { urgent: true });
+  assert.equal(urgent.held, false, 'urgent bypasses the hold');
+  const sum = heldSummary(heldNotifications());
+  assert.equal(sum.title, '밤사이 보고 2건');
+  assert.match(sum.body, /^등급봇 · 주의 · 승인 필요 \/ 등급봇 · 완료$/, 'emoji prefix stripped, titles joined');
+  saveQuietSettings({ enabled: false });
+  assert.equal(flushHeldIfMorning(), true, 'window over: summary goes out');
+  assert.equal(heldNotifications().length, 0);
+  holdNotification({ title: 't' });
+  clearHeld();
+});
+
+test('progress: percent/"n/m" parsing, agent-set values, and a tailed log file that reports completion', () => {
+  assert.deepEqual(parseProgress('frame 120 ... 37% done\nframe 130 ... 41%'), { percent: 41, done: false, failed: false });
+  assert.equal(parseProgress('processing [3/10] clip_03.mp4').percent, 30);
+  assert.equal(parseProgress('rendering 100%').done, true);
+  assert.equal(parseProgress('업로드 완료').done, true);
+  assert.equal(parseProgress('no numbers here').percent, null);
+  assert.equal(parseProgress('Traceback (most recent call last): error').failed, true);
+  assert.equal(parseProgress('9/12/2026 ok').percent, null, 'dates are not progress');
+
+  const wsPath = fs.mkdtempSync(path.join(os.tmpdir(), 'progress-ws-'));
+  const ws = Workspaces.create('progress-ws', wsPath);
+  const agent = Agents.create(ws.id, 'claude', '진행봇');
+  const p = setProgress(agent.id, { percent: 25, label: '쇼츠 영상 만드는 중' });
+  assert.equal(p.percent, 25);
+  assert.equal(p.source, 'agent');
+  clearProgress(agent.id);
+  assert.equal(getProgress(agent.id), null, 'agent-set progress clears when the run settles');
+
+  const log = path.join(wsPath, 'render.log');
+  fs.writeFileSync(log, 'start\n');
+  assert.throws(() => setProgress(agent.id, { log_file: 'missing.log', workspacePath: wsPath }));
+  setProgress(agent.id, { log_file: 'render.log', label: '영상 렌더링', workspacePath: wsPath });
+  clearProgress(agent.id);
+  assert.ok(getProgress(agent.id), 'a watched log survives the end of the turn');
+  fs.appendFileSync(log, 'progress 40%\n');
+  tickProgress();
+  assert.equal(getProgress(agent.id).percent, 40);
+  assert.equal(getProgress(agent.id).eta_ms !== null, true);
+  fs.appendFileSync(log, 'progress 100%\n');
+  tickProgress();
+  const done = getProgress(agent.id);
+  assert.equal(done.done, true);
+  assert.equal(done.percent, 100);
+  const last = Messages.forAgent(agent.id).at(-1);
+  assert.match(last.content, /끝났습니다 · 영상 렌더링/);
+  clearProgress(agent.id, { force: true });
+  assert.equal(getProgress(agent.id), null);
+  Agents.remove(agent.id); Workspaces.remove(ws.id);
+  fs.rmSync(wsPath, { recursive: true, force: true });
+});
+
+test('telegram: approval buttons resolve like the phone, replies become prompts, pairing state is exposed', () => {
+  unlinkTelegram();
+  assert.deepEqual(telegramStatus(), { configured: false, linked: false, bot: null, pair_code: null, last_agent: null });
+  const ws = Workspaces.create('tg-ws', path.join(os.tmpdir(), `tg-ws-${process.pid}`));
+  const agent = Agents.create(ws.id, 'claude', '텔레봇');
+  const r = requestApproval(agent.id, 'Bash', { command: 'npm test' });
+  assert.equal(handleCallbackData('nonsense').ok, false);
+  const ok = handleCallbackData(`ap:${r.approval.id}:allow`);
+  assert.equal(ok.ok, true);
+  assert.equal(Approvals.get(r.approval.id).status, 'allowed');
+  assert.equal(handleCallbackData(`ap:${r.approval.id}:allow`).text, '이미 처리된 요청입니다');
+  assert.match(Messages.forAgent(agent.id).at(-1).content, /승인함 · Bash · 텔레그램에서/);
+  const d = requestApproval(agent.id, 'Bash', { command: 'npm run build' });
+  assert.equal(handleCallbackData(`ap:${d.approval.id}:deny`).text, '⛔ 거부했습니다');
+  assert.equal(Approvals.get(d.approval.id).status, 'denied');
+  Agents.update(agent.id, { status: 'idle' });
+
+  assert.match(handleText('/help'), /leebeegle_SmartAgent/);
+  assert.match(handleText('/list'), new RegExp(`#${agent.id} 텔레봇`));
+  assert.equal(handleText('/use 999999'), '그 번호의 담당자가 없습니다');
+  assert.match(handleText(`/use ${agent.id}`), /텔레봇에게 전달합니다/);
+  assert.equal(telegramStatus().last_agent, agent.id);
+  // 작업 중이면 줄 세우기
+  Agents.update(agent.id, { status: 'working' });
+  assert.match(handleText('로고 색 바꿔줘'), /1번째로 줄 세웠습니다/);
+  assert.equal(queuedPrompts(agent.id).length, 1);
+  removeQueued(agent.id, queuedPrompts(agent.id)[0].id);
+  Agents.update(agent.id, { status: 'idle' });
+  KV.set('tg_last_agent', null);
+  Agents.remove(agent.id); Workspaces.remove(ws.id);
+  unlinkTelegram();
+});
+
+test('phone UI wires risk colours, the progress bar, before/after captures and the new settings', () => {
+  const html = fs.readFileSync(new URL('../public/index.html', import.meta.url), 'utf8');
+  const js = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
+  const css = fs.readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+  const mcp = fs.readFileSync(new URL('../server/mcp-approver.js', import.meta.url), 'utf8');
+  assert.match(js, /level-pill \$\{level\}/);
+  assert.match(css, /\.approve\.lvl-danger/);
+  assert.match(js, /id="progress-bar"/);
+  assert.match(js, /case 'progress\.updated'/);
+  assert.match(js, /msg image compare/);
+  assert.match(js, /meta\.before\?\.file/);
+  assert.match(html, /id="quiet-enabled"/);
+  assert.match(html, /id="tg-token"/);
+  assert.match(js, /api\('\/quiet', \{ method: 'PATCH'/);
+  assert.match(js, /api\('\/telegram', \{ method: 'POST'/);
+  assert.match(mcp, /name: 'progress'/);
+  assert.match(mcp, /phase: \{ type: 'string', enum: \['before', 'after'\]/);
+  assert.match(buildClaudeArgs({ permission_mode: 'ask' }, 'x', {}).join(' '), /mcp__approver__progress/);
+  assert.match(PHONE_STYLE_PROMPT, /mcp__approver__progress/);
+  assert.match(PHONE_STYLE_PROMPT, /phase를 before/);
+});

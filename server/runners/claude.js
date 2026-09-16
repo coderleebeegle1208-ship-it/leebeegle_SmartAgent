@@ -309,7 +309,7 @@ export function buildClaudeArgs(agent, mcpPath, opts = {}) {
   // --strict-mcp-config keeps every turn from also loading the user's global ~/.claude.json MCP
   // servers (unauthorized ones still ship their tool definitions in the prefix); the approver
   // server above still loads because it's passed via --mcp-config.
-  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-prompt-tool', 'mcp__approver__approve', '--mcp-config', mcpPath, '--strict-mcp-config', '--allowedTools', 'mcp__approver__capture', 'mcp__approver__restart_server', 'WebFetch'];
+  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-prompt-tool', 'mcp__approver__approve', '--mcp-config', mcpPath, '--strict-mcp-config', '--allowedTools', 'mcp__approver__capture', 'mcp__approver__progress', 'mcp__approver__restart_server', 'WebFetch'];
   const isPlanOrReview = opts.stage === 'plan' || opts.phase === 'review';
   // Plan output goes to ExitPlanMode (read by the executor turn, not the owner) and review output
   // goes to the other model, so neither needs the phone-tone guide — skipping it there also keeps

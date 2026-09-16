@@ -123,6 +123,7 @@ for (const [table, col, def] of [
   ['agents', 'collab_mode', 'INTEGER NOT NULL DEFAULT 0'],
   ['agents', 'collab_stage', 'TEXT'],
   ['approvals', 'risk', 'TEXT'],                              // 'outside' → 작업 폴더 밖 변경, 묶음 허용에서 제외
+  ['approvals', 'level', 'TEXT'],                             // safe | caution | danger → 카드 색깔
 ]) {
   const has = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
   if (has) continue;
@@ -209,9 +210,9 @@ export const Approvals = {
   get: (id) => db.prepare('SELECT * FROM approvals WHERE id = ?').get(id),
   pending: () => db.prepare("SELECT * FROM approvals WHERE status = 'pending' ORDER BY id").all(),
   pendingForAgent: (aid) => db.prepare("SELECT * FROM approvals WHERE agent_id = ? AND status = 'pending' ORDER BY id").all(aid),
-  create: (agent_id, tool_name, input, risk = null) => {
-    const r = db.prepare('INSERT INTO approvals (agent_id, tool_name, input_json, created_at, risk) VALUES (?, ?, ?, ?, ?)')
-      .run(agent_id, tool_name, JSON.stringify(input), now(), risk);
+  create: (agent_id, tool_name, input, risk = null, level = null) => {
+    const r = db.prepare('INSERT INTO approvals (agent_id, tool_name, input_json, created_at, risk, level) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(agent_id, tool_name, JSON.stringify(input), now(), risk, level);
     return Approvals.get(Number(r.lastInsertRowid));
   },
   resolve: (id, status, message) => {

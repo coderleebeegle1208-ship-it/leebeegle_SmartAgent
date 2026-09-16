@@ -24,11 +24,15 @@ import { CAPTURE_DIR, captureScreenshot, findBrowserBin } from './capture.js';
 import { CODEX_MODEL_CATALOG, MODEL_CATALOG, codexDefaults, isCodexModelAllowed, isModelAllowed } from './models.js';
 import { UPLOAD_DIR, findFfmpeg, loadUpload, saveUpload } from './uploads.js';
 import { copySkill, deleteSkill, listImportableSkills, listSkills, parseFrontmatter, validateSkillName, writeSkill } from './skills.js';
+import { heldNotifications, isQuietNow, quietSettings, saveQuietSettings } from './quiet.js';
+import { clearProgress, getProgress, setProgress } from './progress.js';
+import { configureTelegram, initTelegram, sendTelegram, telegramStatus, unlinkTelegram } from './telegram.js';
 
 const cfg = loadConfig();
 initPush(cfg);
 configureUnattended(cfg);
 startScheduler(cfg);
+initTelegram(cfg);
 
 // A restart means no agent process survived: clear stale "working"/"needs_attention" states.
 for (const a of Agents.all()) {
@@ -90,6 +94,7 @@ function agentView(a) {
     blanket_allow: !!blanketAllow(a.id),
     schedules: Schedules.forAgent(a.id).length,
     queued: queuedPrompts(a.id).length,
+    progress: getProgress(a.id),
   };
 }
 
@@ -614,8 +619,34 @@ api.post('/push/subscribe', (req, res) => {
   res.json({ ok: true });
 });
 api.post('/push/test', async (req, res) => {
-  await sendPush({ title: 'leebeegle_SmartAgent', body: '푸시 알림이 정상 동작합니다.', url: '/' });
+  await sendPush({ title: 'leebeegle_SmartAgent', body: '푸시 알림이 정상 동작합니다.', url: '/' }, { urgent: true });
   res.json({ ok: true, subscriptions: PushSubs.all().length });
+});
+
+// ---------- 방해금지 시간 ----------
+const quietView = () => ({ ...quietSettings(), active: isQuietNow(), held: heldNotifications().length });
+api.get('/quiet', (req, res) => res.json(quietView()));
+api.patch('/quiet', (req, res) => {
+  try { saveQuietSettings(req.body || {}); res.json(quietView()); } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// ---------- 텔레그램 연동 ----------
+api.get('/telegram', (req, res) => res.json(telegramStatus()));
+api.post('/telegram', async (req, res) => {
+  try { res.json(await configureTelegram(req.body?.token)); } catch (e) { res.status(400).json({ error: e.message }); }
+});
+api.delete('/telegram', (req, res) => res.json(unlinkTelegram()));
+api.post('/telegram/test', async (req, res) => {
+  try {
+    await sendTelegram({ title: 'leebeegle_SmartAgent', body: '텔레그램 연결이 정상입니다. 이제 승인 요청과 완료 보고가 여기로 옵니다.', url: '/' });
+    res.json({ ok: true });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// ---------- 진행률 ----------
+api.delete('/agents/:id/progress', (req, res) => {
+  clearProgress(Number(req.params.id), { force: true });
+  res.json({ ok: true });
 });
 
 // Captured screenshots. <img> tags cannot send the bearer header, so the phone passes ?token=.
@@ -693,16 +724,44 @@ api.post('/restart', (req, res) => {
   res.json({ ok: true, pending: true });
 });
 
+/** 같은 화면(source)을 이 담당자가 최근에 찍은 캡처. 'before' 표시가 있으면 시간 제한 없이, 아니면 24시간 안의 것만. */
+function previousCapture(agentId, source, explicitAfter) {
+  const since = Date.now() - 24 * 60 * 60 * 1000;
+  for (const m of Messages.recentByRole(agentId, ['image'], 30).reverse()) {
+    let meta = {};
+    try { meta = m.meta ? JSON.parse(m.meta) : {}; } catch { continue; }
+    if (meta.source !== source || !meta.file) continue;
+    if (meta.phase === 'before' || explicitAfter || m.created_at >= since) return { file: meta.file, width: meta.width, height: meta.height, caption: m.content, at: m.created_at };
+    return null;
+  }
+  return null;
+}
 app.post('/internal/capture', requireInternal, async (req, res) => {
-  const { agentId, url, file, html, caption, width, height, full_page, wait_ms, fit_width_px } = req.body || {};
+  const { agentId, url, file, html, caption, width, height, full_page, wait_ms, fit_width_px, phase } = req.body || {};
   const agent = Agents.get(Number(agentId));
   if (!agent) return res.status(400).json({ error: 'unknown agent' });
   const workspace = Workspaces.get(agent.workspace_id);
   try {
     const shot = await captureScreenshot({ agentId: agent.id, url, file, html, width, height, fullPage: !!full_page, waitMs: wait_ms, fitWidthPx: fit_width_px, workspacePath: workspace?.path });
-    const m = Messages.add(agent.id, 'image', String(caption || '').trim() || '결과 화면', { file: shot.file, width: shot.width, height: shot.height, source: url || file || 'html' });
+    const source = url || file || 'html';
+    // 전·후 비교: 같은 화면을 전에 찍어 둔 게 있으면(phase 'before'로 찍었거나 24시간 안) 나란히 보여준다.
+    const before = phase === 'before' ? null : previousCapture(agent.id, source, phase === 'after');
+    const label = String(caption || '').trim() || (phase === 'before' ? '고치기 전' : before ? '고친 뒤' : '결과 화면');
+    const m = Messages.add(agent.id, 'image', label, { file: shot.file, width: shot.width, height: shot.height, source, ...(phase ? { phase } : {}), ...(before ? { before } : {}) });
     emit('message', { agent_id: agent.id, message: m });
     res.json({ ok: true, ...shot });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/internal/progress', requireInternal, (req, res) => {
+  const { agentId, percent, label, log_file, done } = req.body || {};
+  const agent = Agents.get(Number(agentId));
+  if (!agent) return res.status(400).json({ error: 'unknown agent' });
+  const workspace = Workspaces.get(agent.workspace_id);
+  try {
+    res.json({ ok: true, progress: setProgress(agent.id, { percent, label, log_file, done, workspacePath: workspace?.path }) });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }

@@ -9,6 +9,7 @@ import { explainError, errorMessageText } from '../errors.js';
 import { emit } from '../bus.js';
 import { sendPush } from '../push.js';
 import { expireApprovals, setBlanketAllow } from '../approvals.js';
+import { clearProgress } from '../progress.js';
 import { createRunWatch, watchLimits, describeVerdict } from '../watchdog.js';
 import { runClaude, runClaudeOnce, runClaudeOnceText } from './claude.js';
 import { findCodexEntry, runCodex } from './codex.js';
@@ -88,7 +89,9 @@ function update(agentId, fields) {
   return a;
 }
 function push(agent, title, body) {
-  sendPush({ title: `${agent.name} · ${title}`, body: (body || '').replace(/\s+/g, ' ').slice(0, 180), url: `/?agent=${agent.id}`, tag: `agent-${agent.id}` }).catch(() => {});
+  const full = (body || '').trim();
+  // long: 메신저(텔레그램)에는 보고 전문을 보낸다. 웹 푸시는 180자만.
+  sendPush({ title: `${agent.name} · ${title}`, body: full.replace(/\s+/g, ' ').slice(0, 180), long: full.slice(0, 3500), url: `/?agent=${agent.id}`, tag: `agent-${agent.id}` }).catch(() => {});
 }
 
 /** Always includes this agent's upload folder (creating it if needed) so the --add-dir flag is
@@ -715,6 +718,7 @@ function drainQueue(agentId, cfg, attempt = 0) {
 function finish(agentId, r, opts = {}) {
   flushUsage(agentId);
   setBlanketAllow(agentId, false);
+  clearProgress(agentId); // 로그 감시 중인 진행률은 남고, 에이전트가 직접 준 값만 지운다
   runWatch.delete(agentId);
   snapshotAfter(agentId);
   const agent = Agents.get(agentId);

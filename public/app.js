@@ -273,6 +273,15 @@
         if (state.route.name === 'agent' && state.detail?.agent.id === m.agent.id) loadDetail(m.agent.id, true);
         else if (m.type === 'approval.requested' && state.route.name === 'home') refreshState(true);
         break;
+      case 'progress.updated': {
+        const a = state.data.agents.find((x) => x.id === m.agent_id);
+        if (a) a.progress = m.progress;
+        if (state.route.name === 'agent' && state.detail?.agent.id === m.agent_id) {
+          state.detail.agent.progress = m.progress;
+          renderAgentHead();
+        } else if (state.route.name === 'home') render();
+        break;
+      }
       case 'blanket.changed':
         if (state.route.name === 'agent' && state.detail?.agent.id === m.agent_id) {
           state.detail.agent.blanket_allow = m.on;
@@ -289,6 +298,10 @@
       }
       case 'snapshot.undone':
         if (state.route.name === 'agent' && state.detail?.agent.id === m.agent_id) loadDetail(m.agent_id, true);
+        break;
+      case 'telegram.linked':
+        if ($('#dlg-settings').open) loadTelegram();
+        toast('텔레그램이 연결됐습니다');
         break;
       case 'schedule.updated':
         if (!$('#dlg-schedules').open) break;
@@ -562,13 +575,15 @@
       const groupLabel = hasPinned && (w.pinned ? 'pinned' : 'rest') !== lastGroup ? `<div class="glabel">${w.pinned ? '고정됨' : '최근 활동순'}</div>` : '';
       lastGroup = w.pinned ? 'pinned' : 'rest';
       const rows = list.map((a) => {
-        const snippet = (a.collab_stage ? `${agentStatusText(a)} · 두 모델이 순서대로 작업하고 있습니다` : a.status === 'error' && a.last_error ? a.last_error : a.pending_approvals ? `승인 ${a.pending_approvals}건 대기 중` : a.last_response || '아직 지시한 작업이 없습니다.') + (a.queued ? ` · 대기 ${a.queued}건` : '');
+        const prog = a.progress && !a.progress.done ? `${a.progress.label} ${a.progress.percent}% · ` : '';
+        const snippet = prog + (a.collab_stage ? `${agentStatusText(a)} · 두 모델이 순서대로 작업하고 있습니다` : a.status === 'error' && a.last_error ? a.last_error : a.pending_approvals ? `승인 ${a.pending_approvals}건 대기 중` : a.last_response || '아직 지시한 작업이 없습니다.') + (a.queued ? ` · 대기 ${a.queued}건` : '');
         return `
         <div class="row ${a.status === 'needs_attention' ? 'attn' : ''} ${a.status === 'error' ? 'error' : ''}" data-agent="${a.id}">
           <div class="g">${glyph(a.status)}</div>
           <div style="min-width:0">
             <div class="t"><span class="kind ${a.kind}">${kindLabel[a.kind] || a.kind}</span><strong>${esc(a.name)}</strong><span class="state ${a.status}">${agentStatusText(a)}</span></div>
             <div class="s">${esc(snippet.replace(/\s+/g, ' '))}</div>
+            ${a.progress && !a.progress.done ? `<div class="row-progress"><i style="width:${a.progress.percent}%"></i></div>` : ''}
           </div>
           <div class="m">${ago(a.updated_at)}</div>
         </div>`;
@@ -863,7 +878,7 @@
       </div>
       <div class="planbar" id="planbar" hidden><span>계획이 준비되었습니다.</span><button class="btn primary" id="exec-plan">이 계획대로 실행</button></div>
       <div id="approvals"></div>
-      <div class="progress" id="progress" hidden><span class="spin" aria-hidden="true"></span><span id="progress-text">작업 중</span><span id="progress-time" class="mono"></span><button type="button" class="progress-act" id="progress-blanket" hidden>남은 승인 모두 허용</button></div>
+      <div class="progress" id="progress" hidden><div class="progress-row"><span class="spin" aria-hidden="true"></span><span id="progress-text">작업 중</span><span id="progress-time" class="mono"></span><button type="button" class="progress-act" id="progress-blanket" hidden>남은 승인 모두 허용</button><button type="button" class="progress-act" id="progress-dismiss" hidden aria-label="닫기">✕</button></div><div class="progress-bar" id="progress-bar" hidden><i></i></div></div>
       <div class="blanketbar" id="blanketbar" hidden><span>이번 작업의 승인 요청을 자동으로 허용하는 중</span><button type="button" id="blanket-off">해제</button></div>
       <div class="queuebar" id="queuebar" hidden></div>
       <div class="menu-popover" id="mode-popover" role="menu" hidden>
@@ -934,6 +949,9 @@
       $('#blanket-off').onclick = async () => {
         try { await api(`/agents/${state.detail.agent.id}/blanket`, { method: 'POST', body: { on: false } }); toast('다음 요청부터 다시 승인을 받습니다'); }
         catch (e) { toast(e.message); }
+      };
+      $('#progress-dismiss').onclick = async () => {
+        try { await api(`/agents/${agent.id}/progress`, { method: 'DELETE' }); } catch (e) { toast(e.message); }
       };
       $('#progress-blanket').onclick = async () => {
         if (!confirm('이번 작업이 끝날 때까지 파일 수정·명령 실행 요청을 묻지 않고 모두 허용합니다. 질문은 그대로 받습니다. 계속할까요?')) return;
@@ -1138,16 +1156,35 @@
     }
     return a.collab_stage ? collabStageLabel[a.collab_stage] : '작업 중';
   }
+  const fmtDur = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return s >= 3600 ? `${Math.floor(s / 3600)}시간 ${Math.floor((s % 3600) / 60)}분` : s >= 60 ? `${Math.floor(s / 60)}분 ${s % 60}초` : `${s}초`; };
   function updateProgress(a, running) {
     const bar = $('#progress');
     if (!bar) return;
-    if (!running) { bar.hidden = true; clearInterval(progressTimer); progressTimer = null; syncComposerSpace(); return; }
+    // 긴 작업 진행률(퍼센트)은 담당자가 턴을 끝낸 뒤에도 로그를 지켜보며 계속 뜬다.
+    const p = a.progress;
+    const track = $('#progress-bar'), dismiss = $('#progress-dismiss'), spin = bar.querySelector('.spin');
+    if (!running && !p) { bar.hidden = true; clearInterval(progressTimer); progressTimer = null; syncComposerSpace(); return; }
     const msgs = state.detail?.messages || [];
     const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
     const startedAt = lastUser ? lastUser.created_at : a.updated_at;
+    track.hidden = !p;
+    dismiss.hidden = !p || (running && !p.done);
+    bar.classList.toggle('done', !!p?.done && !p?.failed);
+    bar.classList.toggle('failed', !!p?.failed);
+    spin.hidden = !!p?.done;
+    if (p) {
+      track.querySelector('i').style.width = `${p.percent}%`;
+      track.title = `${p.percent}%`;
+    }
     const tick = () => {
-      const s = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
-      $('#progress-time').textContent = s >= 60 ? `${Math.floor(s / 60)}분 ${s % 60}초` : `${s}초`;
+      if (p) {
+        $('#progress-text').textContent = p.done
+          ? (p.failed ? `${p.label} · 문제가 생긴 것 같습니다` : `${p.label} · 끝났습니다`)
+          : `${p.label} · ${p.percent}%${p.stalled ? ' · 한동안 진행이 없습니다' : running ? ` · ${progressStage(a)}` : ''}`;
+        $('#progress-time').textContent = p.done ? fmtDur(p.elapsed_ms) : p.eta_ms != null ? `남은 시간 약 ${fmtDur(p.eta_ms)}` : fmtDur(Date.now() - (p.started_at || startedAt));
+        return;
+      }
+      $('#progress-time').textContent = fmtDur(Date.now() - startedAt);
       $('#progress-text').textContent = progressStage(a);
     };
     tick();
@@ -1250,10 +1287,20 @@
       el.className = 'msg plan';
       el.innerHTML = `<div class="plan-h">계획${meta.provider ? ` · ${esc(kindLabel[meta.provider] || meta.provider)}` : ''}</div>${rich(m.content)}`;
     } else if (m.role === 'image') {
-      el.className = 'msg image';
-      const src = meta.file ? `/api/captures/${meta.file}?token=${encodeURIComponent(state.token)}` : '';
-      el.innerHTML = `<button type="button" class="image-open" aria-label="크게 보기"><img src="${src}" alt="${esc(m.content)}" loading="lazy" ${meta.width && meta.height ? `width="${meta.width}" height="${meta.height}"` : ''}></button><figcaption>${esc(m.content)}<span class="time">${clock(m.created_at)}</span></figcaption>`;
-      el.querySelector('.image-open').onclick = () => openLightbox(src, m.content);
+      const capUrl = (f) => `/api/captures/${f}?token=${encodeURIComponent(state.token)}`;
+      const src = meta.file ? capUrl(meta.file) : '';
+      if (meta.before?.file) {
+        // 전·후 비교: 같은 화면을 고치기 전에 찍어 둔 것과 나란히
+        el.className = 'msg image compare';
+        const b = meta.before, bsrc = capUrl(b.file);
+        const pane = (label, u, w, h, cap) => `<button type="button" class="image-open" data-src="${u}" data-cap="${esc(cap)}" aria-label="${label} 크게 보기"><span class="pane-label">${label}</span><img src="${u}" alt="${esc(cap)}" loading="lazy" ${w && h ? `width="${w}" height="${h}"` : ''}></button>`;
+        el.innerHTML = `<div class="panes">${pane('전', bsrc, b.width, b.height, b.caption || '고치기 전')}${pane('후', src, meta.width, meta.height, m.content)}</div><figcaption>${esc(m.content)} · 전후 비교<span class="time">${clock(m.created_at)}</span></figcaption>`;
+        el.querySelectorAll('.image-open').forEach((btn) => (btn.onclick = () => openLightbox(btn.dataset.src, btn.dataset.cap)));
+      } else {
+        el.className = `msg image${meta.phase === 'before' ? ' before' : ''}`;
+        el.innerHTML = `<button type="button" class="image-open" aria-label="크게 보기"><img src="${src}" alt="${esc(m.content)}" loading="lazy" ${meta.width && meta.height ? `width="${meta.width}" height="${meta.height}"` : ''}></button><figcaption>${esc(m.content)}<span class="time">${clock(m.created_at)}</span></figcaption>`;
+        el.querySelector('.image-open').onclick = () => openLightbox(src, m.content);
+      }
     } else if (m.role === 'usage') {
       el.className = 'msg usage';
       let u = null;
@@ -1385,6 +1432,12 @@
     const composer = document.querySelector('.composer');
     document.body.style.paddingBottom = composer ? `${composer.offsetHeight + 12}px` : '';
   }
+  // 위험 등급 문구 (서버 LEVEL_LABEL과 같은 뜻): 초록=읽기만, 노랑=폴더 안 변경(되돌리기 가능), 빨강=되돌릴 수 없음
+  const LEVEL_COPY = {
+    safe: { title: '안전', note: '읽기만 하는 요청입니다. 파일이 바뀌지 않습니다.' },
+    caution: { title: '주의', note: '작업 폴더 안을 바꾸는 요청입니다. 마음에 안 들면 되돌리기로 복구할 수 있습니다.' },
+    danger: { title: '위험', note: '되돌릴 수 없는 요청입니다.' },
+  };
   function renderApprovals(list) {
     const host = $('#approvals');
     if (!host) return;
@@ -1426,9 +1479,15 @@
         else if (input.file_path) body = `<div class="cmd"><i>${ICON.file}</i><span>${esc(shortPath(input.file_path))}</span></div>`;
         else body = `<div class="diff">${esc(JSON.stringify(input, null, 1).slice(0, 1500))}</div>`;
         const risky = ap.risk === 'outside';
+        const level = ap.level || (risky ? 'danger' : null);
         if (risky) card.classList.add('risk');
-        const warn = risky ? `<div class="risk-note">작업 폴더 밖을 바꾸는 요청입니다. 허용하면 되돌리기로 복구할 수 없습니다.</div>` : '';
-        card.innerHTML = head + `<h2>${esc(ap.tool_name)} 실행 승인</h2>${warn}${body}
+        if (level) card.classList.add(`lvl-${level}`);
+        const lv = level ? LEVEL_COPY[level] : null;
+        const warn = risky
+          ? `<div class="risk-note">작업 폴더 밖을 바꾸는 요청입니다. 허용하면 되돌리기로 복구할 수 없습니다.</div>`
+          : lv ? `<div class="level-note">${esc(lv.note)}</div>` : '';
+        const pill = lv ? `<span class="level-pill ${level}"><i></i>${esc(lv.title)}</span>` : '';
+        card.innerHTML = head.replace('승인 필요 ·', `${pill}승인 필요 ·`) + `<h2>${esc(ap.tool_name)} 실행 승인</h2>${warn}${body}
           <input class="reason" placeholder="거부 사유 (선택)">
           <div class="btns"><button class="btn ghost" data-deny>거부</button><button class="btn primary" data-allow>${risky ? '그래도 허용' : '허용'}</button></div>
           ${risky ? '' : '<button type="button" class="btn allow-all" data-allow-run>이번 작업 동안 모두 허용<small>끝날 때까지 남은 요청을 묻지 않습니다</small></button>'}`;
@@ -2175,8 +2234,49 @@
     updatePushStatus();
     api('/digest').then((d) => { $('#digest-enabled').checked = !!d.settings.enabled; $('#digest-time').value = d.settings.time; }).catch(() => {});
     loadBackupStatus();
+    loadQuiet();
+    loadTelegram();
     $('#tts-enabled').checked = ttsEnabled();
     $('#dlg-settings').showModal();
+  };
+  // ---------- 방해금지 시간 ----------
+  function renderQuiet(q) {
+    $('#quiet-enabled').checked = !!q.enabled;
+    $('#quiet-start').value = q.start;
+    $('#quiet-end').value = q.end;
+    $('#quiet-status').textContent = !q.enabled ? '' : q.active ? `지금은 방해금지 시간입니다${q.held ? ` · 참아 둔 알림 ${q.held}건` : ''} · ${q.end}에 모아서 보내드립니다` : `${q.start}부터 ${q.end}까지 알림을 참았다가 아침에 한 번에 보냅니다`;
+  }
+  async function loadQuiet() { try { renderQuiet(await api('/quiet')); } catch {} }
+  async function saveQuiet() {
+    try { renderQuiet(await api('/quiet', { method: 'PATCH', body: { enabled: $('#quiet-enabled').checked, start: $('#quiet-start').value, end: $('#quiet-end').value } })); toast('저장했습니다'); }
+    catch (e) { toast(e.message); }
+  }
+  $('#quiet-enabled').onchange = saveQuiet;
+  $('#quiet-start').onchange = saveQuiet;
+  $('#quiet-end').onchange = saveQuiet;
+  // ---------- 텔레그램 ----------
+  function renderTelegram(t) {
+    $('#tg-setup').hidden = t.configured;
+    $('#tg-linked').hidden = !t.configured;
+    if (!t.configured) return;
+    $('#tg-bot').textContent = t.bot || '봇';
+    $('#tg-pair').hidden = t.linked;
+    $('#tg-pair-code').textContent = t.pair_code || '';
+    $('#tg-state').textContent = t.linked ? '연결됨 · 승인 요청과 완료 보고가 텔레그램으로도 갑니다. 답장을 보내면 지시로 전달됩니다.' : '아직 연결 전입니다. 아래 번호를 봇에게 보내주세요.';
+  }
+  async function loadTelegram() { try { renderTelegram(await api('/telegram')); } catch {} }
+  $('#btn-tg-connect').onclick = async () => {
+    const tok = $('#tg-token').value.trim();
+    if (!tok) return toast('토큰을 붙여넣어 주세요');
+    const b = $('#btn-tg-connect'); b.disabled = true;
+    try { renderTelegram(await api('/telegram', { method: 'POST', body: { token: tok } })); $('#tg-token').value = ''; toast('봇을 확인했습니다. 연결 번호를 보내주세요'); }
+    catch (e) { toast(e.message, 3500); }
+    b.disabled = false;
+  };
+  $('#btn-tg-test').onclick = async () => { try { await api('/telegram/test', { method: 'POST' }); toast('텔레그램으로 보냈습니다'); } catch (e) { toast(e.message, 3500); } };
+  $('#btn-tg-unlink').onclick = async () => {
+    if (!confirm('텔레그램 연결을 끊을까요? 다시 연결하려면 토큰을 다시 넣어야 합니다.')) return;
+    try { renderTelegram(await api('/telegram', { method: 'DELETE' })); } catch (e) { toast(e.message); }
   };
   $('#tts-enabled').onchange = (e) => {
     localStorage.setItem('ar_tts', e.target.checked ? '1' : '0');
