@@ -67,10 +67,18 @@
     plan: { field: 'plan_effort', title: '계획', fallback: 'high', hint: '계획은 항상 최소 "높음"으로 실행됩니다.' },
     exec: { field: 'exec_effort', title: '실행', fallback: null, hint: '기본값은 터미널(Claude CLI) 설정을 따릅니다.' },
     manual: { field: 'effort', title: '실행', fallback: null, hint: '단일 모델: 지정한 모델 하나가 이 강도로 실행됩니다.' },
+    // 계획 분담: 다른 쪽 제공자가 계획서만 쓴다. Claude가 맡으면 교차 모델의 계획 설정(plan_*)을 같이 쓴다.
+    xplan: { field: 'plan_effort', title: '계획', fallback: 'high', hint: '다른 쪽 모델이 계획서만 씁니다. 파일은 손대지 않고, 실행은 원래 모델이 합니다.' },
   };
-  const stageModelName = (agent, stage) => agent.kind === 'codex'
-    ? codexModelLabel(agent.codex_model || codexDefaultModel())
-    : modelLabel(stage === 'plan' ? agent.plan_model : stage === 'exec' ? agent.exec_model : agent.model);
+  // 계획 분담에서 계획을 맡는 쪽의 모델 이름 (Claude 에이전트면 Codex, Codex 에이전트면 Claude)
+  const crossPlanModelName = (agent) => agent.kind === 'claude'
+    ? codexModelLabel(agent.codex_plan_model || codexDefaultModel())
+    : modelLabel(agent.plan_model || 'fable');
+  const stageModelName = (agent, stage) => stage === 'xplan'
+    ? crossPlanModelName(agent)
+    : agent.kind === 'codex'
+      ? codexModelLabel(agent.codex_model || codexDefaultModel())
+      : modelLabel(stage === 'plan' ? agent.plan_model : stage === 'exec' ? agent.exec_model : agent.model);
   // Composer mode chips (권한 · 흐름), mirroring the desktop app's mode menu.
   // [value, 메뉴에 쓰는 이름, 설명, 칩에 쓰는 짧은 이름]
   const PERM_OPTIONS = {
@@ -87,18 +95,25 @@
   const PROVIDER_LABEL = { claude: 'Claude', codex: 'Codex' };
   const otherKind = (kind) => (kind === 'codex' ? 'claude' : 'codex');
   const otherProviderName = (kind) => PROVIDER_LABEL[otherKind(kind)];
-  const FLOW_OPTIONS = [
-    ['auto', '교차 모델', '판단 → 계획 → 실행을 여러 모델이 나눠 맡습니다'],
+  // [value, 메뉴 이름, 설명, 칩 짧은 이름]. Codex는 판단→계획→실행 자동 흐름이 없어 교차 모델 항목이 빠진다.
+  const flowOptions = (agent) => [
+    ...(agent.kind === 'codex' ? [] : [['auto', '교차 모델', '판단 → 계획 → 실행을 여러 모델이 나눠 맡습니다']]),
     ['manual', '단일 모델', '모델 하나를 직접 지정해 실행합니다'],
+    ['cross', '계획 나눠 맡기', `${otherProviderName(agent.kind)}가 계획서를 쓰고, ${PROVIDER_LABEL[agent.kind]} 단일 모델이 그대로 실행합니다`, '계획 분담'],
+    ['debate', '계획 합의', `${otherProviderName(agent.kind)} 초안 → ${PROVIDER_LABEL[agent.kind]} 검토 → ${otherProviderName(agent.kind)} 최종안. 의견이 갈리면 두 쪽 주장을 보고 직접 고릅니다`, '계획 합의'],
   ];
-  const flowValue = (agent) => agent.pipeline === 'manual' ? 'manual' : 'auto';
+  const flowValue = (agent) => (agent.kind === 'codex' || agent.pipeline === 'manual') ? (agent.cross_plan ? (agent.plan_debate ? 'debate' : 'cross') : 'manual') : 'auto';
+  // 계획 분담·계획 합의 둘 다 "다른 쪽이 계획, 이쪽이 실행" 구조다.
+  const usesCross = (agent) => ['cross', 'debate'].includes(flowValue(agent));
   const permValue = (agent) => {
     const opts = PERM_OPTIONS[agent.kind] || PERM_OPTIONS.claude;
     return opts.some(([v]) => v === agent.permission_mode) ? agent.permission_mode : agent.kind === 'codex' ? 'acceptEdits' : 'ask';
   };
   const optionLabel = (opts, value) => (opts.find(([v]) => v === value) || opts[0])[1];
   const chipLabel = (opts, value) => { const o = opts.find(([v]) => v === value) || opts[0]; return o[3] || o[1]; };
-  const stageEffortField = (agent, stage) => stage === 'manual' && agent?.kind === 'codex' ? 'codex_effort' : EFFORT_STAGES[stage].field;
+  const stageEffortField = (agent, stage) => stage === 'manual' && agent?.kind === 'codex' ? 'codex_effort'
+    : stage === 'xplan' && agent?.kind === 'claude' ? 'codex_plan_effort'
+    : EFFORT_STAGES[stage].field;
   const stageEffort = (agent, stage) => agent?.[stageEffortField(agent, stage)] || null;
   const stageDefaultEffort = (agent, stage) => stage === 'manual' && agent?.kind === 'codex'
     ? state.data?.codex?.effort || null
@@ -138,11 +153,11 @@
   };
   function glyph(status) {
     switch (status) {
-      case 'needs_attention': return '<svg class="gl" viewBox="0 0 18 18"><circle cx="9" cy="9" r="9" fill="#F2994A"/><path d="M9 4.5v5.2" stroke="#fff" stroke-width="2" stroke-linecap="round"/><circle cx="9" cy="13" r="1.15" fill="#fff"/></svg>';
-      case 'working': return '<svg class="gl" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7.5" fill="none" stroke="#D9A521" stroke-width="1.6"/><path d="M9 3.6A5.4 5.4 0 0 1 14.4 9L9 9z" fill="#D9A521"/></svg>';
-      case 'done': return '<svg class="gl" viewBox="0 0 18 18"><circle cx="9" cy="9" r="9" fill="#5E6AD2"/><path d="M5.3 9.2l2.5 2.5 4.9-5" fill="none" stroke="#fff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-      case 'error': return '<svg class="gl" viewBox="0 0 18 18"><circle cx="9" cy="9" r="9" fill="#B42318"/><path d="M6 6l6 6M12 6l-6 6" stroke="#fff" stroke-width="1.9" stroke-linecap="round"/></svg>';
-      default: return '<svg class="gl" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7.5" fill="none" stroke="#D5D8DC" stroke-width="1.6"/></svg>';
+      case 'needs_attention': return '<svg class="gl" viewBox="0 0 18 18"><circle cx="9" cy="9" r="9" fill="#FBBF24"/><path d="M9 4.5v5.2" stroke="#0F172A" stroke-width="2" stroke-linecap="round"/><circle cx="9" cy="13" r="1.15" fill="#0F172A"/></svg>';
+      case 'working': return '<svg class="gl" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7.5" fill="none" stroke="#60A5FA" stroke-width="1.6"/><path d="M9 3.6A5.4 5.4 0 0 1 14.4 9L9 9z" fill="#60A5FA"/></svg>';
+      case 'done': return '<svg class="gl" viewBox="0 0 18 18"><circle cx="9" cy="9" r="9" fill="#22C55E"/><path d="M5.3 9.2l2.5 2.5 4.9-5" fill="none" stroke="#0F172A" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      case 'error': return '<svg class="gl" viewBox="0 0 18 18"><circle cx="9" cy="9" r="9" fill="#F87171"/><path d="M6 6l6 6M12 6l-6 6" stroke="#0F172A" stroke-width="1.9" stroke-linecap="round"/></svg>';
+      default: return '<svg class="gl" viewBox="0 0 18 18"><circle cx="9" cy="9" r="7.5" fill="none" stroke="#475569" stroke-width="1.6"/></svg>';
     }
   }
   const toolIcon = (name) => ({ Read: ICON.file, Write: ICON.pencil, Edit: ICON.pencil, NotebookEdit: ICON.pencil, Bash: ICON.term, Glob: ICON.search, Grep: ICON.search, WebFetch: ICON.globe, WebSearch: ICON.globe }[name] || ICON.term);
@@ -274,11 +289,12 @@
         if (state.route.name === 'agent' && state.detail?.agent.id === m.agent.id) loadDetail(m.agent.id, true);
         else if (m.type === 'approval.requested' && state.route.name === 'home') refreshState(true);
         break;
-      case 'progress.updated': {
+      case 'jobs.changed': {
+        // 배경 작업(영상 생성 등) 목록. 막대 없이 "돌고 있는 작업 이름"만 보여 준다.
         const a = state.data.agents.find((x) => x.id === m.agent_id);
-        if (a) a.progress = m.progress;
+        if (a) a.jobs = m.jobs;
         if (state.route.name === 'agent' && state.detail?.agent.id === m.agent_id) {
-          state.detail.agent.progress = m.progress;
+          state.detail.agent.jobs = m.jobs;
           renderAgentHead();
         } else if (state.route.name === 'home') render();
         break;
@@ -547,6 +563,7 @@
     $('#btn-back').hidden = state.route.name === 'home';
     $('#topbar').classList.toggle('has-back', state.route.name !== 'home');
     $('#fab').hidden = state.route.name !== 'home';
+    $('#tabs').hidden = state.route.name !== 'home';
     $('#btn-agent-menu').hidden = !isAgent;
     if (!isAgent) document.querySelectorAll('.composer').forEach((c) => c.remove());
     if (state.route.name === 'home') renderHome();
@@ -559,9 +576,10 @@
     const d = state.data;
     if (!d) { view.innerHTML = '<div class="empty">불러오는 중…</div>'; return; }
     const c = d.counts;
-    const chips = [['all', '전체'], ['needs_attention', '승인 필요'], ['working', '작업 중'], ['done', '완료'], ['error', '오류']]
-      .filter(([k]) => k === 'all' || k === 'needs_attention' || k === 'working' || k === 'done' || (c[k] || 0) > 0)
-      .map(([k, l]) => `<button class="chip ${k === 'needs_attention' && c[k] ? 'attn' : ''} ${state.filter === k ? 'on' : ''}" data-filter="${k}">${l} <b>${c[k] || 0}</b></button>`).join('');
+    const chipClass = { needs_attention: 'attn', working: 'working', done: 'done', error: 'error' };
+    const chips = [['all', '전체'], ['needs_attention', '승인'], ['working', '작업'], ['done', '완료'], ['error', '오류']]
+      .map(([k, l]) => `<button class="chip ${chipClass[k] || ''} ${state.filter === k ? 'on' : ''}" data-filter="${k}">${l}<b>${c[k] || 0}</b></button>`).join('');
+    syncTabs(c);
     const agentsOf = (wid) => d.agents.filter((a) => a.workspace_id === wid && (state.filter === 'all' || a.status === state.filter));
     const lastActivity = (wid) => Math.max(0, ...d.agents.filter((a) => a.workspace_id === wid).map((a) => a.updated_at));
     const ordered = [...d.workspaces].sort((a, b) => (b.pinned - a.pinned) || (lastActivity(b.id) - lastActivity(a.id)) || (a.id - b.id));
@@ -576,45 +594,53 @@
       const groupLabel = hasPinned && (w.pinned ? 'pinned' : 'rest') !== lastGroup ? `<div class="glabel">${w.pinned ? '고정됨' : '최근 활동순'}</div>` : '';
       lastGroup = w.pinned ? 'pinned' : 'rest';
       const rows = list.map((a) => {
-        const prog = a.progress && !a.progress.done ? `${a.progress.label} ${a.progress.percent}% · ` : '';
+        const prog = a.jobs?.length ? `배경 작업 ${a.jobs.map((j) => j.label).join(', ')} · ` : '';
         const snippet = prog + (a.collab_stage ? `${agentStatusText(a)} · 두 모델이 순서대로 작업하고 있습니다` : a.status === 'error' && a.last_error ? a.last_error : a.pending_approvals ? `승인 ${a.pending_approvals}건 대기 중` : a.last_response || '아직 지시한 작업이 없습니다.') + (a.queued ? ` · 대기 ${a.queued}건` : '');
+        const cls = { needs_attention: 'attn', working: 'working', done: 'done', error: 'error' }[a.status] || '';
         return `
-        <div class="row ${a.status === 'needs_attention' ? 'attn' : ''} ${a.status === 'error' ? 'error' : ''}" data-agent="${a.id}">
-          <div class="g">${glyph(a.status)}</div>
+        <div class="row glass ${cls}" data-agent="${a.id}">
+          <div class="g ${a.kind}">${a.kind === 'codex' ? 'CX' : 'CL'}</div>
           <div style="min-width:0">
-            <div class="t"><span class="kind ${a.kind}">${kindLabel[a.kind] || a.kind}</span><strong>${esc(a.name)}</strong><span class="state ${a.status}">${agentStatusText(a)}</span></div>
+            <div class="t"><strong>${esc(a.name)}</strong></div>
             <div class="s">${esc(snippet.replace(/\s+/g, ' '))}</div>
-            ${a.progress && !a.progress.done ? `<div class="row-progress"><i style="width:${a.progress.percent}%"></i></div>` : ''}
           </div>
-          <div class="m">${ago(a.updated_at)}</div>
+          <div class="m"><span class="st"><i></i>${agentStatusText(a)}</span><time>${ago(a.updated_at)}</time></div>
         </div>`;
       }).join('');
       const summary = collapsed
         ? `에이전트 ${allAgents.length}${working ? ` · 작업 중 ${working}` : ''}${attn ? ` · 승인 ${attn}` : ''}`
         : tailPath(w.path, 30);
       return `${groupLabel}
-        <div class="sect ${collapsed ? 'collapsed' : ''}">
-          <button class="pin ${w.pinned ? 'on' : ''}" data-pin="${w.id}" aria-label="고정">${ICON.star}</button>
-          <button class="n" data-toggle="${w.id}"><strong>${esc(w.name)}</strong></button>
-          <button class="tb" data-git="${w.id}">커밋</button>
-          <button class="tb" data-add-agent="${w.id}" aria-label="에이전트 추가">${ICON.plus}</button>
-          <span class="chev-btn ${collapsed ? '' : 'open'}" data-toggle="${w.id}">${ICON.chev}</span>
-          <div class="sect-meta">${repoChipHTML(w)}<small>${esc(summary)}</small></div>
+        <div class="sect ${collapsed ? 'collapsed glass' : ''}">
+          <div class="nm"><button class="n" data-toggle="${w.id}"><strong>${esc(w.name)}</strong></button><div class="sect-meta">${collapsed ? '' : repoChipHTML(w)}<small>${esc(summary)}</small></div></div>
+          <div class="acts ${collapsed ? '' : 'glass'}">
+            <button class="tb" data-git="${w.id}">커밋</button>
+            <button class="tb" data-add-agent="${w.id}" aria-label="에이전트 추가">${ICON.plus}</button>
+            <button class="pin ${w.pinned ? 'on' : ''}" data-pin="${w.id}" aria-label="고정">${ICON.star}</button>
+            <button class="chev-btn ${collapsed ? '' : 'open'}" data-toggle="${w.id}" aria-label="${collapsed ? '펼치기' : '접기'}">${ICON.chev}</button>
+          </div>
         </div>
-        ${collapsed ? '' : rows || `<div class="row-empty">${state.filter === 'all' ? '에이전트를 추가하세요.' : '해당 상태의 에이전트가 없습니다.'}</div>`}`;
+        ${collapsed ? '' : `<div class="cards">${rows || `<div class="row-empty glass">${state.filter === 'all' ? '에이전트를 추가하세요.' : '해당 상태의 에이전트가 없습니다.'}</div>`}</div>`}`;
     }).join('');
     const comp = d.computer;
     view.innerHTML = `
-      <div class="pc">
-        <div class="h">${esc(comp.name)} <em class="${comp.connected ? '' : 'off'}">${comp.connected ? 'Connected' : 'Offline'}</em></div>
-        <div class="sub">${comp.platform === 'win32' ? 'Windows PC' : comp.platform} · 마지막 동기화 ${ago(state.syncedAt || Date.now())}</div>
-        <div class="stat"><span>CPU <b>${comp.cpu}%</b></span><span>RAM <b>${comp.mem}%</b></span></div>
+      <div class="home">
+      <div class="bento">
+        <div class="pc glass">
+          <div class="h"><i class="${comp.connected ? '' : 'off'}"></i><span>${esc(comp.name)}</span></div>
+          <div class="sub">${comp.platform === 'win32' ? 'Windows PC' : comp.platform} · ${comp.connected ? '동기화' : '연결 끊김'} ${ago(state.syncedAt || Date.now())}</div>
+          <div class="gauges">
+            <div class="gauge"><div class="l">CPU <b>${comp.cpu}%</b></div><div class="bar"><i style="width:${comp.cpu}%"></i></div></div>
+            <div class="gauge mem"><div class="l">RAM <b>${comp.mem}%</b></div><div class="bar"><i style="width:${comp.mem}%"></i></div></div>
+          </div>
+        </div>
         <div id="usage">${usageHTML()}</div>
       </div>
-      <button type="button" class="digest-card" id="digest-card" ${state.digest ? '' : 'hidden'}>${digestCardHTML(state.digest)}</button>
-      <div class="rail">${chips}</div>
+      <button type="button" class="digest-card glass" id="digest-card" ${state.digest ? '' : 'hidden'}>${digestCardHTML(state.digest)}</button>
+      <div class="rail glass">${chips}</div>
       ${d.workspaces.length ? groups : '<div class="empty">오른쪽 아래 + 버튼으로 프로젝트 폴더를 추가하세요.</div>'}
-      <div style="height:24px"></div>`;
+      <div style="height:24px"></div>
+      </div>`;
     loadUsage();
     loadDigestCard();
     $('#digest-card').onclick = () => openDigest();
@@ -642,23 +668,37 @@
     }));
   }
 
+  // 하단 탭: 홈(전체) · 승인 · 작업 은 상태 필터, 설정은 설정 창
+  function syncTabs(c) {
+    const tabs = $('#tabs'); if (!tabs) return;
+    tabs.querySelectorAll('[data-tab]').forEach((b) => {
+      const k = b.dataset.tab;
+      b.classList.toggle('on', k === state.filter || (k === 'all' && !['needs_attention', 'working'].includes(state.filter)));
+      const bd = b.querySelector('.bd');
+      if (bd) { const n = c?.[k] || 0; bd.textContent = n; bd.hidden = !n; }
+    });
+  }
+  document.querySelectorAll('#tabs [data-tab]').forEach((b) => (b.onclick = () => { state.filter = b.dataset.tab; window.scrollTo(0, 0); render(); }));
+  const tabSettings = $('#tab-settings');
+  if (tabSettings) tabSettings.onclick = () => $('#btn-settings').click();
+
   // ---------- usage limits ----------
   const activeUsageProvider = () => state.route.name === 'agent' && state.detail?.agent?.kind === 'codex' ? 'codex' : 'claude';
   const providerUsage = (provider = activeUsageProvider()) => state.usage?.[provider] || null;
   function usageHTML() {
     const u = providerUsage('claude');
-    if (!u) return '<div class="limits-hint">사용량 불러오는 중…</div>';
-    if (!u.ok && !u.items?.length) return `<div class="limits-hint">사용량을 읽지 못했습니다${u.error ? ` · ${esc(u.error)}` : ''}</div>`;
+    if (!u) return '<div class="limits glass limits-hint">사용량 불러오는 중…</div>';
+    if (!u.ok && !u.items?.length) return `<div class="limits glass limits-hint">사용량을 읽지 못했습니다${u.error ? ` · ${esc(u.error)}` : ''}</div>`;
     const pills = usageSlots('claude').map(([label, item]) => {
       const pct = item ? Math.max(0, Math.min(100, Number(item.pct) || 0)) : null;
       const tone = pct == null ? '' : pct >= 90 ? 'hot' : pct >= 70 ? 'warm' : '';
-      return `<div class="pill ${tone}"><span class="pt">${label.replace(' 한도', '')} <b>${pct == null ? '—' : pct + '%'}</b></span><span class="pl"><i style="width:${pct == null ? 0 : pct}%"></i></span></div>`;
+      return `<div class="pill ${tone}"><span class="pt">${label} <b>${pct == null ? '—' : pct + '%'}</b></span><span class="pl"><i style="width:${pct == null ? 0 : pct}%"></i></span></div>`;
     }).join('');
     const open = state.usageOpen;
-    return `<button type="button" class="limits" data-usage-toggle aria-expanded="${open}">${pills}</button>
+    return `<button type="button" class="limits glass" data-usage-toggle aria-expanded="${open}">${pills}</button>
       ${open
-        ? `<div class="limits-card"><div class="usage-popover-head"><strong>Claude 사용 한도</strong><button type="button" data-usage-refresh>새로고침</button></div>${usagePopupHTML()}</div>`
-        : '<div class="limits-hint">탭하면 리셋 시각을 볼 수 있어요</div>'}`;
+        ? `<div class="limits-card glass"><div class="usage-popover-head"><strong>Claude 사용 한도</strong><button type="button" data-usage-refresh>새로고침</button></div>${usagePopupHTML()}</div>`
+        : ''}`;
   }
   function usageSlots(provider = activeUsageProvider()) {
     const items = providerUsage(provider)?.items || [];
@@ -771,25 +811,51 @@
           <select id="composer-exec" aria-label="실행 모델" ${disabled}>${modelOptions('exec', agent.exec_model || 'sonnet', agent)}</select>
           <button type="button" class="step-effort" data-stage="exec" aria-haspopup="dialog" aria-expanded="false" title="실행 강도 조절" ${disabled}>실행 · <b>${stageEffortText(agent, 'exec')}</b></button>
         </div>`;
-    } else if (agent.kind === 'claude') {
-      flow = `
+    } else {
+      // 단일 모델. 계획 분담이 켜져 있으면 앞에 다른 쪽 제공자의 계획 단계가 붙는다.
+      const cross = usesCross(agent);
+      const debate = flowValue(agent) === 'debate';
+      const planner = otherProviderName(agent.kind);
+      const execLabel = cross ? `${PROVIDER_LABEL[agent.kind]} 실행` : '실행';
+      let plannerStep = '';
+      if (cross && agent.kind === 'claude') {
+        const current = agent.codex_plan_model || '';
+        plannerStep = `
+        <div class="pipeline-step planner" title="계획 모델(Codex) 선택">
+          <select id="composer-xplan" aria-label="계획 모델" ${disabled}><option value="" ${!current ? 'selected' : ''}>기본 · ${esc(codexModelLabel(codexDefaultModel()))}</option>${codexModelOptions(current)}</select>
+          <button type="button" class="step-effort" data-stage="xplan" aria-haspopup="dialog" aria-expanded="false" title="계획 강도 조절" ${disabled}>${planner} ${debate ? '계획·합의' : '계획'} · <b>${stageEffortText(agent, 'xplan')}</b></button>
+        </div>
+        <i class="pipeline-arrow" aria-hidden="true">→</i>`;
+      } else if (cross) {
+        plannerStep = `
+        <div class="pipeline-step planner" title="계획 모델(Claude) 선택">
+          <select id="composer-xplan" aria-label="계획 모델" ${disabled}>${modelOptions('plan', agent.plan_model || 'fable', agent)}</select>
+          <button type="button" class="step-effort" data-stage="xplan" aria-haspopup="dialog" aria-expanded="false" title="계획 강도 조절" ${disabled}>${planner} ${debate ? '계획·합의' : '계획'} · <b>${stageEffortText(agent, 'xplan')}</b></button>
+        </div>
+        <i class="pipeline-arrow" aria-hidden="true">→</i>`;
+      }
+      let execStep;
+      if (agent.kind === 'claude') {
+        execStep = `
         <div class="pipeline-step" title="실행 모델 선택">
           <select id="composer-model" aria-label="실행 모델" ${disabled}><option value="" ${!agent.model ? 'selected' : ''}>기본 모델</option>${modelOptions('manual', agent.model || '', agent)}</select>
-          <button type="button" class="step-effort" data-stage="manual" aria-haspopup="dialog" aria-expanded="false" title="실행 강도 조절" ${disabled}>실행 · <b>${stageEffortText(agent, 'manual')}</b></button>
-        </div>
-        <span class="pipeline-direct">단일 모델</span>`;
-    } else {
-      const current = agent.codex_model || '';
-      const defaultLabel = codexModelLabel(codexDefaultModel());
-      flow = `
+          <button type="button" class="step-effort" data-stage="manual" aria-haspopup="dialog" aria-expanded="false" title="실행 강도 조절" ${disabled}>${execLabel} · <b>${stageEffortText(agent, 'manual')}</b></button>
+        </div>`;
+      } else {
+        const current = agent.codex_model || '';
+        const defaultLabel = codexModelLabel(codexDefaultModel());
+        execStep = `
         <div class="pipeline-step" title="코덱스 모델 선택">
           <select id="composer-model" aria-label="코덱스 모델" ${disabled}><option value="" ${!current ? 'selected' : ''}>기본 · ${esc(defaultLabel)}</option>${codexModelOptions(current)}</select>
-          <button type="button" class="step-effort" data-stage="manual" aria-haspopup="dialog" aria-expanded="false" title="생각 깊이 조절" ${disabled}>실행 · <b>${stageEffortText(agent, 'manual')}</b></button>
-        </div>
-        <span class="pipeline-direct">단일 모델</span>`;
+          <button type="button" class="step-effort" data-stage="manual" aria-haspopup="dialog" aria-expanded="false" title="생각 깊이 조절" ${disabled}>${execLabel} · <b>${stageEffortText(agent, 'manual')}</b></button>
+        </div>`;
+      }
+      flow = plannerStep + execStep + (cross ? '' : `<span class="pipeline-direct">단일 모델</span>`);
     }
     void reviewer;
-    return `<div class="pipeline-flow" aria-label="자동 실행 흐름">${flow}</div>`;
+    // 단일 모델(계획 분담 포함)은 단계가 한두 개라 양 끝으로 벌리지 않고 왼쪽에 모아 둔다.
+    const compact = agent.kind !== 'claude' || agent.pipeline === 'manual';
+    return `<div class="pipeline-flow${compact ? ' compact' : ''}" aria-label="자동 실행 흐름">${flow}</div>`;
   }
 
   const chevron = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
@@ -800,9 +866,7 @@
       `<button type="button" class="mode-chip provider" data-menu="provider" aria-haspopup="menu" aria-expanded="false" title="실행 제공자${agent.auto_failover ? ' · 한도가 차면 자동 전환' : ''}" ${locked ? 'disabled' : ''}>${PROVIDER_LABEL[agent.kind]}${agent.auto_failover ? `<i class="auto" title="한도가 차면 ${otherProviderName(agent.kind)}로 자동 전환">⇄</i>` : sessions[otherKind(agent.kind)] ? '<i class="saved" title="다른 쪽에 저장된 대화 있음"></i>' : ''}${chevron}</button>`,
       `<button type="button" class="mode-chip" data-menu="perm" aria-haspopup="menu" aria-expanded="false" title="권한 방식">${perm}${chevron}</button>`,
     ];
-    if (agent.kind === 'claude') {
-      chips.push(`<button type="button" class="mode-chip" data-menu="flow" aria-haspopup="menu" aria-expanded="false" title="모델 구성" ${locked ? 'disabled' : ''}>${optionLabel(FLOW_OPTIONS, flowValue(agent))}${chevron}</button>`);
-    }
+    chips.push(`<button type="button" class="mode-chip" data-menu="flow" aria-haspopup="menu" aria-expanded="false" title="모델 구성" ${locked ? 'disabled' : ''}>${chipLabel(flowOptions(agent), flowValue(agent))}${chevron}</button>`);
     const reviewer = otherProviderName(agent.kind);
     const reviewDisabled = locked || (!agent.collab_mode && !state.data?.tools?.codex) ? 'disabled' : '';
     return `<div class="mode-chips">${chips.join('')}</div>
@@ -811,6 +875,24 @@
         <input id="collab-mode" type="checkbox" ${agent.collab_mode ? 'checked' : ''} ${reviewDisabled} aria-label="${reviewer} 자동 검토">
       </label>
       <button class="usage-ring" id="usage-ring" type="button" aria-expanded="false"><span aria-hidden="true"></span></button>`;
+  }
+
+  /** 계획 확인 대기 막대. 계획 이견이면 계획 담당 안·검토 담당 안 두 버튼, 아니면 "이 계획대로 실행" 하나. */
+  function renderPlanbar(bar, a) {
+    const planner = otherProviderName(a.kind), exec = PROVIDER_LABEL[a.kind];
+    const key = a.plan_dispute ? 'dispute' : 'single';
+    if (bar.dataset.key !== key) {
+      bar.dataset.key = key;
+      bar.innerHTML = a.plan_dispute
+        ? `<span>두 쪽 의견이 갈렸습니다. 어느 안으로 실행할까요?</span><button class="btn" data-side="planner">${planner} 계획 안</button><button class="btn primary" data-side="reviewer">${exec} 검토 안</button>`
+        : `<span>계획이 준비되었습니다.</span><button class="btn primary" data-side="planner">이 계획대로 실행</button>`;
+    }
+    bar.querySelectorAll('button[data-side]').forEach((btn) => (btn.onclick = async () => {
+      try {
+        await api(`/agents/${a.id}/execute-plan`, { method: 'POST', body: { side: btn.dataset.side } });
+        toast(btn.dataset.side === 'reviewer' ? `${exec} 검토 안으로 실행합니다` : '실행 시작');
+      } catch (e) { toast(e.message); }
+    }));
   }
 
   // ---------- agent detail ----------
@@ -835,12 +917,15 @@
     const reviewerName = agent.kind === 'codex' ? 'Claude' : 'Codex';
     const flowCopy = agent.collab_mode
       ? `${providerName} 구현 → ${reviewerName} 리뷰 → ${providerName} 수정`
-      : agent.kind === 'codex'
-        ? `Codex · ${codexModelLabel(agent.codex_model || codexDefaultModel())} · 단일 모델`
-        : `${providerName}에서 다음 지시를 이어갑니다`;
+      : usesCross(agent)
+        ? `${reviewerName} 계획 → ${providerName} 실행`
+        : agent.kind === 'codex'
+          ? `Codex · ${codexModelLabel(agent.codex_model || codexDefaultModel())} · 단일 모델`
+          : `${providerName}에서 다음 지시를 이어갑니다`;
     const switchLocked = !!(agent.running || agent.status === 'working' || agent.status === 'needs_attention' || agent.pending_plan);
     $('#topbar-title').textContent = agent.name;
     const y = keepScroll ? window.scrollY : null;
+    const stick = keepScroll && nearBottom();
     view.innerHTML = `
       <div class="meta">
         <div class="badges">
@@ -877,9 +962,9 @@
         <div class="effort-scale" aria-hidden="true"><span>더 빠르게</span><span>더 스마트하게</span></div>
         <small class="effort-hint" id="effort-hint"></small>
       </div>
-      <div class="planbar" id="planbar" hidden><span>계획이 준비되었습니다.</span><button class="btn primary" id="exec-plan">이 계획대로 실행</button></div>
+      <div class="planbar" id="planbar" hidden></div>
       <div id="approvals"></div>
-      <div class="progress" id="progress" hidden><div class="progress-row"><span class="spin" aria-hidden="true"></span><span id="progress-text">작업 중</span><span id="progress-time" class="mono"></span><button type="button" class="progress-act" id="progress-blanket" hidden>남은 승인 모두 허용</button><button type="button" class="progress-act" id="progress-dismiss" hidden aria-label="닫기">✕</button></div><div class="progress-bar" id="progress-bar" hidden><i></i></div></div>
+      <div class="progress" id="progress" hidden><div class="progress-row"><span class="spin" aria-hidden="true"></span><span id="progress-text">작업 중</span><span id="progress-time" class="mono"></span><button type="button" class="progress-act" id="progress-blanket" hidden>남은 승인 모두 허용</button></div></div>
       <div class="blanketbar" id="blanketbar" hidden><span>이번 작업의 승인 요청을 자동으로 허용하는 중</span><button type="button" id="blanket-off">해제</button></div>
       <div class="queuebar" id="queuebar" hidden></div>
       <div class="menu-popover" id="mode-popover" role="menu" hidden>
@@ -911,7 +996,6 @@
         <button class="btn stop" id="stop" hidden>중지</button>
       </div>`;
       document.body.appendChild(composer);
-      $('#exec-plan').onclick = async () => { try { await api(`/agents/${state.detail.agent.id}/execute-plan`, { method: 'POST' }); toast('실행 시작'); } catch (e) { toast(e.message); } };
       const ta = $('#prompt');
       ta.addEventListener('input', () => {
         ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
@@ -951,9 +1035,6 @@
         try { await api(`/agents/${state.detail.agent.id}/blanket`, { method: 'POST', body: { on: false } }); toast('다음 요청부터 다시 승인을 받습니다'); }
         catch (e) { toast(e.message); }
       };
-      $('#progress-dismiss').onclick = async () => {
-        try { await api(`/agents/${agent.id}/progress`, { method: 'DELETE' }); } catch (e) { toast(e.message); }
-      };
       $('#progress-blanket').onclick = async () => {
         if (!confirm('이번 작업이 끝날 때까지 파일 수정·명령 실행 요청을 묻지 않고 모두 허용합니다. 질문은 그대로 받습니다. 계속할까요?')) return;
         try { await api(`/agents/${state.detail.agent.id}/blanket`, { method: 'POST', body: { on: true } }); toast('이번 작업 동안 모두 허용합니다'); }
@@ -974,6 +1055,13 @@
         syncEffortUI('manual');
         renderAgentHead();
       });
+    };
+    const xplanSel = $('#composer-xplan');
+    if (xplanSel) xplanSel.onchange = (e) => {
+      const isCodexPlanner = state.detail.agent.kind === 'claude';
+      const field = isCodexPlanner ? 'codex_plan_model' : 'plan_model';
+      const label = isCodexPlanner ? codexModelLabel(e.target.value || codexDefaultModel()) : modelLabel(e.target.value);
+      return patchAgent({ [field]: e.target.value || null }, `계획 모델을 ${label}로 변경했습니다`).then(() => syncEffortUI('xplan'));
     };
     if (triageSel) triageSel.onchange = (e) => patchAgent({ triage_model: e.target.value }, `판단 모델을 ${modelLabel(e.target.value)}로 변경했습니다`);
     if (planSel) planSel.onchange = (e) => patchAgent({ plan_model: e.target.value }, `계획 모델을 ${modelLabel(e.target.value)}로 변경했습니다`);
@@ -1043,12 +1131,14 @@
         ['claude', 'Claude', sessions.claude ? '이어서 쓸 대화가 있습니다' : 'Claude Max 구독으로 실행합니다'],
         ['codex', 'Codex', !state.data?.tools?.codex ? 'Codex를 노트북에서 찾지 못했습니다' : sessions.codex ? '이어서 쓸 대화가 있습니다' : 'ChatGPT 구독으로 실행합니다'],
       ];
-      const opts = kind === 'provider' ? providerOptions : kind === 'perm' ? (PERM_OPTIONS[a.kind] || PERM_OPTIONS.claude) : FLOW_OPTIONS;
+      const opts = kind === 'provider' ? providerOptions : kind === 'perm' ? (PERM_OPTIONS[a.kind] || PERM_OPTIONS.claude) : flowOptions(a);
+      // Claude가 실행하고 Codex가 계획을 맡으려면 Codex CLI가 있어야 한다.
+      const crossBlocked = kind === 'flow' && a.kind === 'claude' && !state.data?.tools?.codex;
       const current = kind === 'provider' ? a.kind : kind === 'perm' ? permValue(a) : flowValue(a);
       $('#mode-title').textContent = kind === 'provider' ? '어느 쪽으로 실행할까요' : kind === 'perm' ? `권한 · ${PROVIDER_LABEL[a.kind]}` : '모델 구성';
       $('#mode-items').innerHTML = opts.map(([v, label, desc]) => `
-        <button type="button" class="menu-item" role="menuitemradio" data-value="${v}" aria-checked="${v === current}">
-          <span><b>${label}</b><small>${desc}</small></span><i aria-hidden="true">✓</i>
+        <button type="button" class="menu-item" role="menuitemradio" data-value="${v}" aria-checked="${v === current}" ${crossBlocked && (v === 'cross' || v === 'debate') ? 'disabled' : ''}>
+          <span><b>${label}</b><small>${crossBlocked && (v === 'cross' || v === 'debate') ? 'Codex를 노트북에서 찾지 못했습니다' : desc}</small></span><i aria-hidden="true">✓</i>
         </button>`).join('');
       // The provider menu carries the limit-failover switch, since both are about "who runs this".
       const failoverRow = kind !== 'provider' ? '' : `
@@ -1087,7 +1177,8 @@
             $('#composer-modes').innerHTML = composerModesHTML(state.detail.agent, switchLocked);
             bindModeChips();
           } else {
-            await patchAgent(value === 'manual' ? { pipeline: 'manual' } : { pipeline: 'auto', confirm_plan: false }, `모델 구성을 "${optionLabel(opts, value)}"로 바꿨습니다`);
+            const body = value === 'auto' ? { pipeline: 'auto', confirm_plan: false } : { pipeline: 'manual', cross_plan: value === 'cross' || value === 'debate', plan_debate: value === 'debate' };
+            await patchAgent(body, `모델 구성을 "${optionLabel(opts, value)}"로 바꿨습니다`);
             renderAgent(true);
           }
         } catch (e) { toast(e.message); }
@@ -1137,8 +1228,8 @@
     if (!providerUsage(agent.kind)) loadUsage(false, agent.kind);
     const sendButton = $('#send');
     if (sendButton) sendButton.textContent = agent.collab_mode ? '협업 실행' : '보내기';
-    if (y !== null) window.scrollTo(0, y);
-    else window.scrollTo(0, document.body.scrollHeight);
+    if (y === null || stick) { window.scrollTo(0, document.body.scrollHeight); hideNewBelow(); }
+    else { window.scrollTo(0, y); if (keepScroll) showNewBelow(); }
   }
   // "지금 뭘 하고 있나 · 얼마나 걸리고 있나" strip above the input while a run is live.
   let progressTimer = null;
@@ -1161,32 +1252,21 @@
   function updateProgress(a, running) {
     const bar = $('#progress');
     if (!bar) return;
-    // 긴 작업 진행률(퍼센트)은 담당자가 턴을 끝낸 뒤에도 로그를 지켜보며 계속 뜬다.
-    const p = a.progress;
-    const track = $('#progress-bar'), dismiss = $('#progress-dismiss'), spin = bar.querySelector('.spin');
-    if (!running && !p) { bar.hidden = true; clearInterval(progressTimer); progressTimer = null; syncComposerSpace(); return; }
+    // 담당자가 일하는 동안의 상태 줄. 배경 작업(영상 생성 등)이 돌고 있으면 이름만 같이 보여 준다 — 막대는 없다.
+    const jobs = a.jobs || [];
+    if (!running && !jobs.length) { bar.hidden = true; clearInterval(progressTimer); progressTimer = null; syncComposerSpace(); return; }
     const msgs = state.detail?.messages || [];
     const lastUser = [...msgs].reverse().find((m) => m.role === 'user');
     const startedAt = lastUser ? lastUser.created_at : a.updated_at;
-    track.hidden = !p;
-    dismiss.hidden = !p || (running && !p.done);
-    bar.classList.toggle('done', !!p?.done && !p?.failed);
-    bar.classList.toggle('failed', !!p?.failed);
-    spin.hidden = !!p?.done;
-    if (p) {
-      track.querySelector('i').style.width = `${p.percent}%`;
-      track.title = `${p.percent}%`;
-    }
+    const jobText = jobs.length ? `배경 작업 · ${jobs.map((j) => j.label + (j.attempt > 1 ? ` (재시도 ${j.attempt})` : '')).join(', ')} · 끝나면 자동 확인` : '';
     const tick = () => {
-      if (p) {
-        $('#progress-text').textContent = p.done
-          ? (p.failed ? `${p.label} · 문제가 생긴 것 같습니다` : `${p.label} · 끝났습니다`)
-          : `${p.label} · ${p.percent}%${p.stalled ? ' · 한동안 진행이 없습니다' : running ? ` · ${progressStage(a)}` : ''}`;
-        $('#progress-time').textContent = p.done ? fmtDur(p.elapsed_ms) : p.eta_ms != null ? `남은 시간 약 ${fmtDur(p.eta_ms)}` : fmtDur(Date.now() - (p.started_at || startedAt));
-        return;
+      if (running) {
+        $('#progress-time').textContent = fmtDur(Date.now() - startedAt);
+        $('#progress-text').textContent = jobText ? `${progressStage(a)} · ${jobText}` : progressStage(a);
+      } else {
+        $('#progress-time').textContent = fmtDur(Date.now() - Math.min(...jobs.map((j) => j.started_at)));
+        $('#progress-text').textContent = jobText;
       }
-      $('#progress-time').textContent = fmtDur(Date.now() - startedAt);
-      $('#progress-text').textContent = progressStage(a);
     };
     tick();
     if (bar.hidden) { bar.hidden = false; syncComposerSpace(); }
@@ -1207,9 +1287,11 @@
         ? `${activeProvider} · ${collabStageLabel[a.collab_stage] || '협업 중'}`
         : a.collab_mode
           ? `${owner} 구현 → ${reviewer} 리뷰 → ${owner} 수정`
-          : a.kind === 'codex'
-            ? `Codex · ${codexModelLabel(a.codex_model || codexDefaultModel())} · 단일 모델`
-            : `${owner}에서 다음 지시를 이어갑니다`;
+          : usesCross(a)
+            ? flowValue(a) === 'debate' ? `${reviewer} 계획 → ${owner} 검토 → 합의 → ${owner} 실행` : `${reviewer} 계획 → ${owner} 실행`
+            : a.kind === 'codex'
+              ? `Codex · ${codexModelLabel(a.codex_model || codexDefaultModel())} · 단일 모델`
+              : `${owner}에서 다음 지시를 이어갑니다`;
     }
     const pendingPlan = !!a.pending_plan;
     const running = !pendingPlan && (a.running || a.status === 'working' || a.status === 'needs_attention');
@@ -1217,7 +1299,7 @@
     if (send) { send.hidden = false; send.textContent = running ? '줄 세우기' : '보내기'; send.classList.toggle('queue-mode', running); }
     if (stop) stop.hidden = !running;
     renderQueue();
-    if (planbar) planbar.hidden = !pendingPlan;
+    if (planbar) { planbar.hidden = !pendingPlan; if (pendingPlan) renderPlanbar(planbar, a); }
     const blanket = running && !!a.blanket_allow;
     if (blanketbar) blanketbar.hidden = !blanket;
     // Only 매번 승인 agents ask often enough for "모두 허용" to save taps; the other modes already run through.
@@ -1274,6 +1356,8 @@
   function appendMessage(m, scroll) {
     const box = $('#msgs');
     if (!box) return;
+    // 위로 올려 읽는 중이면 따라 내려가지 않고 '새 내용' 버튼만 띄운다.
+    const follow = scroll && nearBottom();
     const el = document.createElement('div');
     let meta = {};
     try { meta = m.meta ? JSON.parse(m.meta) : {}; } catch {}
@@ -1286,7 +1370,11 @@
       el.innerHTML = `<i>${toolIcon(name)}</i><span>${name ? `<b>${esc(name)}</b>` : ''}${esc(shortPath(text))}</span>`;
     } else if (m.role === 'plan') {
       el.className = 'msg plan';
-      el.innerHTML = `<div class="plan-h">계획${meta.provider ? ` · ${esc(kindLabel[meta.provider] || meta.provider)}` : ''}</div>${rich(m.content)}`;
+      el.innerHTML = `<div class="plan-h">${meta.final ? '최종 계획' : '계획'}${meta.provider ? ` · ${esc(kindLabel[meta.provider] || meta.provider)}` : ''}</div>${rich(m.content)}`;
+    } else if (m.role === 'plan_review') {
+      // 계획 합의: 실행 담당이 초안을 읽고 낸 의견. 동의면 바로 실행, 수정 제안이면 계획 담당이 최종안을 쓴다.
+      el.className = `msg plan review ${meta.verdict === 'agree' ? 'agree' : 'revise'}`;
+      el.innerHTML = `<div class="plan-h">계획 검토${meta.provider ? ` · ${esc(kindLabel[meta.provider] || meta.provider)}` : ''} · ${meta.verdict === 'agree' ? '동의' : '수정 제안'}</div>${rich(m.content)}`;
     } else if (m.role === 'image') {
       const capUrl = (f) => `/api/captures/${f}?token=${encodeURIComponent(state.token)}`;
       const src = meta.file ? capUrl(meta.file) : '';
@@ -1300,6 +1388,22 @@
       } else {
         el.className = `msg image${meta.phase === 'before' ? ' before' : ''}`;
         el.innerHTML = `<button type="button" class="image-open" aria-label="크게 보기"><img src="${src}" alt="${esc(m.content)}" loading="lazy" ${meta.width && meta.height ? `width="${meta.width}" height="${meta.height}"` : ''}></button><figcaption>${esc(m.content)}<span class="time">${clock(m.created_at)}</span></figcaption>`;
+        el.querySelector('.image-open').onclick = () => openLightbox(src, m.content);
+      }
+    } else if (m.role === 'video' || m.role === 'image-file') {
+      // 에이전트가 send_file 도구로 보낸 완성 영상·사진: 첨부 저장소의 파일을 채팅에서 바로 재생/보기
+      const upUrl = (f) => `/api/uploads/${f}?token=${encodeURIComponent(state.token)}`;
+      const src = meta.file ? upUrl(meta.file) : '';
+      const dur = meta.duration ? `${Math.floor(meta.duration / 60)}:${String(Math.round(meta.duration % 60)).padStart(2, '0')}` : '';
+      const size = meta.size ? (meta.size >= 1e6 ? `${(meta.size / 1e6).toFixed(1)}MB` : `${Math.round(meta.size / 1e3)}KB`) : '';
+      const info = [dur, size].filter(Boolean).join(' · ');
+      el.className = `msg image video${meta.height > meta.width ? ' portrait' : ''}`;
+      if (m.role === 'video') {
+        const poster = meta.poster ? ` poster="${upUrl(meta.poster)}"` : '';
+        el.innerHTML = `<video controls playsinline preload="metadata"${poster} src="${src}"></video><figcaption>${esc(m.content)}${info ? ` <span class="info">${esc(info)}</span>` : ''}<a class="dl" href="${src}" download="${esc(meta.name || 'video')}">저장</a><span class="time">${clock(m.created_at)}</span></figcaption>`;
+      } else {
+        const view = meta.view ? upUrl(meta.view) : src;
+        el.innerHTML = `<button type="button" class="image-open" aria-label="크게 보기"><img src="${view}" alt="${esc(m.content)}" loading="lazy"></button><figcaption>${esc(m.content)}${info ? ` <span class="info">${esc(info)}</span>` : ''}<span class="time">${clock(m.created_at)}</span></figcaption>`;
         el.querySelector('.image-open').onclick = () => openLightbox(src, m.content);
       }
     } else if (m.role === 'usage') {
@@ -1357,7 +1461,9 @@
       const source = m.role === 'assistant' && meta.provider
         ? `<span class="msg-source">${esc(kindLabel[meta.provider] || meta.provider)}${meta.phase ? ` · ${esc(phaseLabel[meta.phase] || meta.phase)}` : ''}</span>`
         : '';
-      const skillBadge = m.role === 'user' && meta.skill ? `<span class="msg-skill">스킬 · ${esc(meta.skill.name)}</span>` : '';
+      const skillBadge = m.role === 'user' && meta.skill ? `<span class="msg-skill">스킬 · ${esc(meta.skill.name)}</span>`
+        : m.role === 'user' && meta.steered ? '<span class="msg-skill">처리 중 끼워 넣음</span>'
+        : m.role === 'user' && meta.auto ? '<span class="msg-skill">자동 · 배경 작업 확인</span>' : '';
       el.innerHTML = source + skillBadge + (m.role === 'assistant' ? rich(m.content) : esc(m.content))
         + (m.role === 'user' ? messageAttachmentsHTML(meta) : '')
         + (m.role === 'user' || m.role === 'assistant' ? `<span class="time">${clock(m.created_at)}${m.role === 'assistant' && 'speechSynthesis' in window ? `<button type="button" class="speak-btn" aria-label="읽어주기">${ICON.speaker}</button>` : ''}</span>` : '');
@@ -1384,8 +1490,26 @@
     } else {
       box.appendChild(el);
     }
-    if (scroll) window.scrollTo(0, document.body.scrollHeight);
+    if (follow) window.scrollTo(0, document.body.scrollHeight);
+    else if (scroll) showNewBelow();
   }
+  // 바닥에서 120px 안쪽이면 '따라 내려가도 되는' 상태로 본다.
+  function nearBottom() {
+    return window.innerHeight + window.scrollY >= document.body.scrollHeight - 120;
+  }
+  function showNewBelow() {
+    let b = $('#new-below');
+    if (!b) {
+      b = document.createElement('button');
+      b.id = 'new-below'; b.type = 'button'; b.className = 'new-below';
+      b.textContent = '새 내용 보기 ↓';
+      b.onclick = () => { window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }); hideNewBelow(); };
+      document.body.appendChild(b);
+    }
+    b.hidden = false;
+  }
+  function hideNewBelow() { const b = $('#new-below'); if (b) b.hidden = true; }
+  window.addEventListener('scroll', () => { if (nearBottom()) hideNewBelow(); }, { passive: true });
   // The composer is fixed to the bottom, so the page needs a matching bottom gap; an approval
   // card can double its height, so measure instead of assuming.
   const fmtSize = (n) => n >= 1e9 ? `${(n / 1e9).toFixed(1)}GB` : n >= 1e6 ? `${(n / 1e6).toFixed(1)}MB` : n >= 1e3 ? `${Math.round(n / 1e3)}KB` : `${n}B`;
@@ -1422,11 +1546,19 @@
     if (!bar) return;
     const list = state.detail?.queue || [];
     bar.hidden = !list.length;
-    bar.innerHTML = list.length ? `<div class="queue-head">대기 중 ${list.length}건 · 지금 작업이 끝나면 순서대로 시작</div>` + list.map((q, i) => `
-      <div class="queue-item"><span class="n">${i + 1}</span><span class="t">${esc(q.text || '(첨부만)')}</span><button type="button" class="x" data-qid="${q.id}" aria-label="빼기">✕</button></div>`).join('') : '';
+    // Claude가 일하는 중이면 "지금" 버튼으로 처리 중인 작업에 바로 끼워 넣을 수 있다(데스크톱과 같은 동작).
+    const a = state.detail?.agent;
+    const canSteer = !!a && a.kind === 'claude' && (a.running || a.status === 'working');
+    bar.innerHTML = list.length ? `<div class="queue-head">대기 중 ${list.length}건 · ${canSteer ? '"지금"을 누르면 처리 중인 작업에 바로 끼워 넣습니다' : '지금 작업이 끝나면 순서대로 시작'}</div>` + list.map((q, i) => `
+      <div class="queue-item"><span class="n">${i + 1}</span><span class="t">${esc(q.text || '(첨부만)')}</span>${canSteer && !q.auto ? `<button type="button" class="now" data-now="${q.id}">지금</button>` : ''}<button type="button" class="x" data-qid="${q.id}" aria-label="빼기">✕</button></div>`).join('') : '';
     bar.querySelectorAll('[data-qid]').forEach((b) => (b.onclick = async () => {
       try { await api(`/agents/${state.detail.agent.id}/queue/${b.dataset.qid}`, { method: 'DELETE' }); toast('대기열에서 뺐습니다'); }
       catch (e) { toast(e.message); }
+    }));
+    bar.querySelectorAll('[data-now]').forEach((b) => (b.onclick = async () => {
+      b.disabled = true;
+      try { await api(`/agents/${state.detail.agent.id}/queue/${b.dataset.now}/now`, { method: 'POST' }); toast('처리 중인 작업에 끼워 넣었습니다'); }
+      catch (e) { b.disabled = false; toast(e.message); }
     }));
     syncComposerSpace();
   }
@@ -1443,7 +1575,7 @@
   function renderApprovals(list) {
     const host = $('#approvals');
     if (!host) return;
-    const atBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
+    const atBottom = nearBottom();
     host.innerHTML = '';
     for (const ap of list) {
       let input = {};

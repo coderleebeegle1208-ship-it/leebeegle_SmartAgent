@@ -89,7 +89,7 @@ test('Codex always gets bounded context, tool output, and concise response setti
 test('Codex gets only the safe dashboard tools without leaking the internal token into arguments', () => {
   const cfg = { port: 3000, internalToken: 'secret-value' };
   const settings = codexApproverConfig(cfg);
-  assert.ok(settings.some((s) => s.includes('enabled_tools=["capture","restart_server"]')));
+  assert.ok(settings.some((s) => s.includes('enabled_tools=["capture","restart_server","run_job","watch_job","send_file"]')));
   assert.ok(settings.every((s) => !s.includes(cfg.internalToken)));
   const env = codexApproverEnv({ id: 7 }, cfg);
   assert.equal(env.APPROVER_AGENT_ID, '7');
@@ -1147,7 +1147,7 @@ const { riskLevel, LEVEL_LABEL } = await import('../server/approvals.js');
 const { inQuietWindow, saveQuietSettings, quietSettings, isQuietNow, holdNotification, heldNotifications, heldSummary, clearHeld } = await import('../server/quiet.js');
 const { sendPush } = await import('../server/push.js');
 const { flushHeldIfMorning } = await import('../server/scheduler.js');
-const { parseProgress, setProgress, getProgress, clearProgress, tickProgress } = await import('../server/progress.js');
+const { judgeLog, startJob, watchLog, finishJob, tickJobs, jobsForAgent, jobFollowUpPrompt, setJobFinishedHandler, MAX_ATTEMPTS } = await import('../server/jobs.js');
 const { handleCallbackData, handleText, telegramStatus, unlinkTelegram, muteTelegram, isMuted } = await import('../server/telegram.js');
 const { Settings: KV } = await import('../server/db.js');
 
@@ -1208,43 +1208,56 @@ test('quiet hours: overnight window, notifications are held and flushed as one m
   clearHeld();
 });
 
-test('progress: percent/"n/m" parsing, agent-set values, and a tailed log file that reports completion', () => {
-  assert.deepEqual(parseProgress('frame 120 ... 37% done\nframe 130 ... 41%'), { percent: 41, done: false, failed: false });
-  assert.equal(parseProgress('processing [3/10] clip_03.mp4').percent, 30);
-  assert.equal(parseProgress('rendering 100%').done, true);
-  assert.equal(parseProgress('업로드 완료').done, true);
-  assert.equal(parseProgress('no numbers here').percent, null);
-  assert.equal(parseProgress('Traceback (most recent call last): error').failed, true);
-  assert.equal(parseProgress('9/12/2026 ok').percent, null, 'dates are not progress');
+test('background jobs: the server runs the command, keeps a log, and calls the agent back with a retry count', async () => {
+  assert.deepEqual(judgeLog('frame 120 ... 37% done\nframe 130 ... 41%'), { done: false, failed: false });
+  assert.equal(judgeLog('rendering 100%').done, true);
+  assert.equal(judgeLog('업로드 완료').done, true);
+  assert.equal(judgeLog('Traceback (most recent call last): error').failed, true);
 
-  const wsPath = fs.mkdtempSync(path.join(os.tmpdir(), 'progress-ws-'));
-  const ws = Workspaces.create('progress-ws', wsPath);
-  const agent = Agents.create(ws.id, 'claude', '진행봇');
-  const p = setProgress(agent.id, { percent: 25, label: '쇼츠 영상 만드는 중' });
-  assert.equal(p.percent, 25);
-  assert.equal(p.source, 'agent');
-  clearProgress(agent.id);
-  assert.equal(getProgress(agent.id), null, 'agent-set progress clears when the run settles');
+  const wsPath = fs.mkdtempSync(path.join(os.tmpdir(), 'jobs-ws-'));
+  const ws = Workspaces.create('jobs-ws', wsPath);
+  const agent = Agents.create(ws.id, 'claude', '작업봇');
+  const finished = [];
+  setJobFinishedHandler((agentId, job, outcome, tail) => finished.push({ agentId, job, outcome, tail }));
 
+  // 실패하는 명령: 종료 코드가 0이 아니면 failed로 끝나고 후속 지시가 "재시도"를 담는다
+  const bad = startJob(agent.id, { command: 'echo boom & exit 3', label: '12화 영상 생성', workspacePath: wsPath, shell: 'cmd' });
+  assert.equal(bad.attempt, 1);
+  assert.ok(fs.existsSync(bad.log_file));
+  assert.deepEqual(jobsForAgent(agent.id).map((j) => j.label), ['12화 영상 생성']);
+  await new Promise((r) => { const t = setInterval(() => { if (finished.length) { clearInterval(t); r(); } }, 50); });
+  assert.equal(finished[0].outcome, 'failed');
+  assert.equal(jobsForAgent(agent.id).length, 0);
+  const prompt = jobFollowUpPrompt(finished[0].job, 'failed', finished[0].tail);
+  assert.match(prompt, /\[배경 작업 감시\] "12화 영상 생성" 작업이 실패/);
+  assert.match(prompt, /mcp__approver__run_job을 다시 불러 재시도/);
+  assert.match(prompt, new RegExp(`시도 1/${MAX_ATTEMPTS}`));
+
+  // 같은 이름으로 다시 오면 재시도 횟수가 이어지고, 3번째에는 더 재시도하지 말라고 한다
+  const again = startJob(agent.id, { command: 'echo ok', label: '12화 영상 생성', workspacePath: wsPath, shell: 'cmd' });
+  assert.equal(again.attempt, 2);
+  await new Promise((r) => { const t = setInterval(() => { if (finished.length >= 2) { clearInterval(t); r(); } }, 50); });
+  assert.equal(finished[1].outcome, 'done');
+  assert.match(jobFollowUpPrompt({ ...finished[1].job, attempt: MAX_ATTEMPTS }, 'failed', ''), /더 재시도하지 말고/);
+  const notes = Messages.forAgent(agent.id).filter((m) => m.role === 'system').map((m) => m.content);
+  assert.ok(notes.some((n) => /배경 작업 시작 · 12화 영상 생성 \(재시도 2\/3\)/.test(n)), notes.join(' | '));
+  assert.ok(notes.some((n) => /배경 작업 실패 · 12화 영상 생성/.test(n)));
+
+  // 다른 방법으로 띄운 작업: 로그만 지켜보다 "완료"가 찍히면 끝난 것으로 본다
   const log = path.join(wsPath, 'render.log');
   fs.writeFileSync(log, 'start\n');
-  assert.throws(() => setProgress(agent.id, { log_file: 'missing.log', workspacePath: wsPath }));
-  setProgress(agent.id, { log_file: 'render.log', label: '영상 렌더링', workspacePath: wsPath });
-  clearProgress(agent.id);
-  assert.ok(getProgress(agent.id), 'a watched log survives the end of the turn');
-  fs.appendFileSync(log, 'progress 40%\n');
-  tickProgress();
-  assert.equal(getProgress(agent.id).percent, 40);
-  assert.equal(getProgress(agent.id).eta_ms !== null, true);
-  fs.appendFileSync(log, 'progress 100%\n');
-  tickProgress();
-  const done = getProgress(agent.id);
-  assert.equal(done.done, true);
-  assert.equal(done.percent, 100);
-  const last = Messages.forAgent(agent.id).at(-1);
-  assert.match(last.content, /끝났습니다 · 영상 렌더링/);
-  clearProgress(agent.id, { force: true });
-  assert.equal(getProgress(agent.id), null);
+  assert.throws(() => watchLog(agent.id, { log_file: 'missing.log', label: 'x', workspacePath: wsPath }));
+  const w = watchLog(agent.id, { log_file: 'render.log', label: '영상 렌더링', workspacePath: wsPath });
+  tickJobs();
+  assert.equal(jobsForAgent(agent.id).length, 1, 'still running while the log has no done marker');
+  fs.appendFileSync(log, '렌더링 완료\n');
+  tickJobs();
+  assert.equal(jobsForAgent(agent.id).length, 0);
+  assert.equal(finished.at(-1).outcome, 'done');
+  assert.equal(finished.at(-1).job.id, w.id);
+  assert.equal(finishJob(9999), null);
+
+  setJobFinishedHandler(null);
   Agents.remove(agent.id); Workspaces.remove(ws.id);
   fs.rmSync(wsPath, { recursive: true, force: true });
 });
@@ -1309,17 +1322,107 @@ test('phone UI wires risk colours, the progress bar, before/after captures and t
   const mcp = fs.readFileSync(new URL('../server/mcp-approver.js', import.meta.url), 'utf8');
   assert.match(js, /level-pill \$\{level\}/);
   assert.match(css, /\.approve\.lvl-danger/);
-  assert.match(js, /id="progress-bar"/);
-  assert.match(js, /case 'progress\.updated'/);
+  assert.ok(!/id="progress-bar"/.test(js), 'the percent bar is gone');
+  assert.match(js, /case 'jobs\.changed'/);
+  assert.match(js, /queue\/\$\{b\.dataset\.now\}\/now/, 'queued prompts can be steered into the running turn');
   assert.match(js, /msg image compare/);
   assert.match(js, /meta\.before\?\.file/);
   assert.match(html, /id="quiet-enabled"/);
   assert.match(html, /id="tg-token"/);
   assert.match(js, /api\('\/quiet', \{ method: 'PATCH'/);
   assert.match(js, /api\('\/telegram', \{ method: 'POST'/);
-  assert.match(mcp, /name: 'progress'/);
+  assert.match(mcp, /name: 'run_job'/);
+  assert.match(mcp, /name: 'watch_job'/);
   assert.match(mcp, /phase: \{ type: 'string', enum: \['before', 'after'\]/);
-  assert.match(buildClaudeArgs({ permission_mode: 'ask' }, 'x', {}).join(' '), /mcp__approver__progress/);
-  assert.match(PHONE_STYLE_PROMPT, /mcp__approver__progress/);
+  const claudeArgs = buildClaudeArgs({ permission_mode: 'ask' }, 'x', {}).join(' ');
+  assert.match(claudeArgs, /mcp__approver__watch_job/);
+  assert.match(claudeArgs, /--input-format stream-json/, 'stdin stays open so the owner can steer mid-turn');
+  assert.ok(!/mcp__approver__progress/.test(claudeArgs));
+  assert.match(PHONE_STYLE_PROMPT, /mcp__approver__run_job/);
+  assert.ok(!/진행률 막대가 뜨게/.test(PHONE_STYLE_PROMPT));
   assert.match(PHONE_STYLE_PROMPT, /phase를 before/);
+});
+
+// 단일 모델 + 계획 분담 (2026-09-17): 다른 쪽 제공자가 계획서를 쓰고 원래 모델이 실행한다.
+test('cross plan: who plans, with which model and effort', async () => {
+  const { usesCrossPlan, crossPlanner, codexPlannerPrompt } = await import('../server/runners/index.js');
+  // 켜져 있어도 교차 모델(auto) 흐름에서는 쓰지 않는다 — 그 흐름은 자체 계획 단계가 있다.
+  assert.equal(usesCrossPlan({ kind: 'claude', pipeline: 'auto', cross_plan: 1 }), false);
+  assert.equal(usesCrossPlan({ kind: 'claude', pipeline: 'manual', cross_plan: 1 }), true);
+  assert.equal(usesCrossPlan({ kind: 'claude', pipeline: 'manual', cross_plan: 0 }), false);
+  // Codex는 pipeline 값과 상관없이 늘 단일 모델이라 켜기만 하면 된다.
+  assert.equal(usesCrossPlan({ kind: 'codex', pipeline: 'auto', cross_plan: 1 }), true);
+  // Claude 에이전트 → Codex가 계획: 전용 설정, 비어 있으면 기본 모델 + 높음
+  assert.deepEqual(crossPlanner({ kind: 'claude', codex_plan_model: null, codex_plan_effort: null }), { kind: 'codex', model: codexDefaults().model, effort: 'high' });
+  assert.deepEqual(crossPlanner({ kind: 'claude', codex_plan_model: 'gpt-6-astra', codex_plan_effort: 'xhigh' }), { kind: 'codex', model: 'gpt-6-astra', effort: 'xhigh' });
+  // Codex 에이전트 → Claude가 계획: 교차 모델의 계획 설정을 그대로 쓴다
+  assert.deepEqual(crossPlanner({ kind: 'codex', plan_model: 'opus', plan_effort: 'medium' }), { kind: 'claude', model: 'opus', effort: 'medium' });
+  assert.deepEqual(crossPlanner({ kind: 'codex', plan_model: null, plan_effort: null }), { kind: 'claude', model: 'fable', effort: 'high' });
+  // Codex 계획 지시문: ExitPlanMode 대신 답변으로 계획을 내고, 파일은 손대지 않게 한다
+  const ws = Workspaces.create('xplan', path.join(os.tmpdir(), 'xplan-ws'));
+  const a = Agents.create(ws.id, 'claude', 'x');
+  const prompt = codexPlannerPrompt(a.id, '로그인 화면 만들어줘');
+  assert.match(prompt, /\[요청\]\n로그인 화면 만들어줘/);
+  assert.match(prompt, /계획만 세워라/);
+  assert.match(prompt, /파일을 수정하거나/);
+  assert.doesNotMatch(prompt, /ExitPlanMode/);
+});
+
+test('codex planner turn: read-only sandbox, chosen model/effort, no phone-tone guide', () => {
+  // 계획서는 실행 모델이 읽으므로 폰 말투 지침을 붙이지 않는다
+  assert.equal(codexStyledText('계획 세워', { session_id: null }, { stage: 'plan' }), '계획 세워');
+  const entry = { cmd: 'codex', pre: [] };
+  const agent = { id: 1, kind: 'codex', permission_mode: 'acceptEdits', session_id: null, model: 'gpt-6-astra', effort: 'xhigh' };
+  const args = buildCodexArgs(entry, agent, { path: 'C:/ws' }, '계획', { sandbox: 'read-only' });
+  assert.ok(args.includes('--sandbox') && args[args.indexOf('--sandbox') + 1] === 'read-only');
+  assert.ok(args.includes('-m') && args[args.indexOf('-m') + 1] === 'gpt-6-astra');
+  assert.ok(args.includes('model_reasoning_effort="xhigh"'));
+  assert.ok(!args.includes('resume'));
+});
+
+// 계획 합의 (2026-09-17): 실행 담당이 초안을 검토하고, 수정 제안이면 계획 담당이 최종안을 쓴다. 이견이면 대표가 고른다.
+test('plan debate: switch, verdict parsing, prompts', async () => {
+  const { usesPlanDebate, parsePlanVerdict, parsePlanConclusion, planReviewPrompt, planFinalPrompt } = await import('../server/runners/index.js');
+  // 계획 분담 위에서만 켜진다
+  assert.equal(usesPlanDebate({ kind: 'claude', pipeline: 'manual', cross_plan: 1, plan_debate: 1 }), true);
+  assert.equal(usesPlanDebate({ kind: 'claude', pipeline: 'manual', cross_plan: 0, plan_debate: 1 }), false);
+  assert.equal(usesPlanDebate({ kind: 'claude', pipeline: 'auto', cross_plan: 1, plan_debate: 1 }), false);
+  assert.equal(usesPlanDebate({ kind: 'codex', pipeline: 'auto', cross_plan: 1, plan_debate: 0 }), false);
+  // 검토 판정: 첫 줄만 본다. 못 읽으면 수정 제안(초안을 그냥 밀지 않는 쪽)으로.
+  assert.equal(parsePlanVerdict('판정: 동의\n초안대로 해도 됩니다.'), 'agree');
+  assert.equal(parsePlanVerdict('\n  판정 : 동의'), 'agree');
+  assert.equal(parsePlanVerdict('판정: 수정 제안\n- db.js에 컬럼이 빠짐'), 'revise');
+  assert.equal(parsePlanVerdict('좋아 보이는데 동의합니다'), 'revise');
+  assert.equal(parsePlanVerdict(''), 'revise');
+  // 최종안 결론: 이견만 특별 취급, 나머지는 합의
+  assert.equal(parsePlanConclusion('결론: 이견\n이견 사유: 마이그레이션 순서'), 'dispute');
+  assert.equal(parsePlanConclusion('결론: 합의\n1. …'), 'agree');
+  assert.equal(parsePlanConclusion('# 계획\n…'), 'agree');
+  // 검토 지시문: 대화 전체가 아니라 요청과 초안만 담는다(토큰 절약), 판정 첫 줄 규칙을 알려 준다
+  const review = planReviewPrompt('로그인 만들어', '1. 화면 2. API');
+  assert.ok(review.includes('[요청]\n로그인 만들어') && review.includes('[계획 초안]\n1. 화면 2. API'));
+  assert.ok(review.includes('판정: 동의') && review.includes('판정: 수정 제안') && !review.includes('최근 대화'));
+  // 최종안 지시문: 계획 담당이 Claude면 ExitPlanMode로 제출, Codex면 답변 본문으로
+  const fc = planFinalPrompt('요청', '초안', '- 고쳐라', 'claude');
+  assert.ok(fc.includes('ExitPlanMode') && fc.includes('결론: 이견') && fc.includes('[실행 담당의 검토 의견]\n- 고쳐라'));
+  assert.ok(!planFinalPrompt('요청', '초안', '- 고쳐라', 'codex').includes('ExitPlanMode'));
+});
+
+test('plan debate: dispute pauses with pending_plan and executePlan clears it', async () => {
+  const { executePlan } = await import('../server/runners/index.js');
+  const ws = Workspaces.create('debate', path.join(os.tmpdir(), 'debate-ws'));
+  // Codex 에이전트로 둔다: 테스트에서는 CODEX_BIN이 node라 실제 CLI가 뜨지 않는다.
+  const a = Agents.create(ws.id, 'codex', 'd');
+  Agents.update(a.id, { pipeline: 'manual', cross_plan: 1, plan_debate: 1 });
+  assert.equal(Agents.get(a.id).plan_debate, 1);
+  // 이견 상태에서는 어느 안으로 실행할지 고를 수 있어야 하고, 고르면 대기 표시가 풀린다
+  Agents.update(a.id, { status: 'needs_attention', pending_plan: 1, plan_dispute: 1 });
+  Messages.add(a.id, 'plan', '결론: 이견\n이견 사유: 순서\n1. A', { provider: 'codex', final: true });
+  Messages.add(a.id, 'plan_review', '판정: 수정 제안\n- B로', { provider: 'claude', verdict: 'revise' });
+  const after = executePlan(a.id, { }, 'reviewer');
+  assert.equal(after.pending_plan, 0);
+  assert.equal(after.plan_dispute, 0);
+  assert.equal(after.status, 'working');
+  const notes = Messages.forAgent(a.id, 20).filter((m) => m.role === 'system').map((m) => m.content);
+  assert.ok(notes.some((n) => n.includes('검토 담당 안 선택')), notes.join(' | '));
 });

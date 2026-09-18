@@ -234,6 +234,19 @@
   - 사용량 원 클릭 시 세 가지 한도 팝업 표시
   - 판단 모델 선택 변경 및 저장 확인
 
+## 추가 완료 (2026-09-17, 단일 모델 + 계획 분담)
+
+- 단일 모델 흐름에서 다른 제공자가 계획서만 먼저 쓰고, 원래 모델이 그 계획대로 실행한다. Claude 단일 모델이면 Codex가 계획, Codex 단일 모델이면 Claude가 계획.
+- DB: `agents.cross_plan`(0/1), `codex_plan_model`, `codex_plan_effort`(null → 기본 모델 / `high`). Claude가 계획을 맡을 때는 교차 모델의 `plan_model`/`plan_effort`를 그대로 쓴다(`crossPlanner(agent)`).
+- 서버(`runners/index.js`): `usesCrossPlan`은 `cross_plan`이 켜져 있고 (Codex이거나 pipeline이 auto가 아닐 때)만 참. `runCrossPlan`이 `runPipeline` 단일 모델 분기와 협업(`runCollaboration`)의 첫 구현 단계 앞에서 돈다.
+  - Claude 계획: 기존 auto 파이프라인과 같이 `--permission-mode plan` + `planPhase`로 ExitPlanMode를 가로채 `plan` 메시지로 저장.
+  - Codex 계획: `sandbox read-only` + fresh 스레드 + `captureAs: 'plan'`(중간 assistant 메시지는 대화에 안 남김). 마지막 답변을 `plan` 메시지(meta.provider = codex)로 저장. 지시문은 `codexPlannerPrompt`(ExitPlanMode 대신 답변으로 계획만 출력). `codexStyledText`는 stage `plan`에 폰 말투 지침을 붙이지 않는다.
+  - 계획서를 못 받으면(한도·예산·빈 답) 지시를 막지 않고 실행 모델이 계획 없이 바로 실행한다. 사용자가 멈춘 경우만 종료. 한도 전환으로 이어받은 지시(`allowFailover: false`)는 계획이 이미 붙어 있어 다시 계획하지 않는다.
+- 앱: `모델 구성` 칩 메뉴에 `계획 나눠 맡기`(칩 이름 `계획 분담`) 추가. Codex 에이전트에도 칩이 보인다(교차 모델 항목은 없음). Codex CLI가 없으면 Claude 쪽 메뉴 항목이 비활성.
+  - 켜면 입력창 위 흐름 줄이 `[계획 모델 / Codex 계획 · 높음] → [실행 모델 / Claude 실행 · 기본]`으로 바뀐다. 계획 단계는 `.pipeline-step.planner`(옅은 accent 배경). 강도 슬라이더 stage `xplan`(필드는 Claude 에이전트면 `codex_plan_effort`, Codex 에이전트면 `plan_effort`).
+  - 단일 모델 줄은 `.pipeline-flow.compact`로 왼쪽에 모아 둔다. 머리글 문구 `Codex 계획 → Claude 실행`.
+- 테스트 78/78. 임시 서버(포트 3999, 임시 DB)로 양방향 화면과 PATCH 왕복, 실제 실행(Codex Terra 낮음 계획 → Sonnet 낮음 실행) 확인.
+
 ## 현재 실제 동작에서 알아둘 점
 
 - 사용량 API는 Claude CLI의 `/usage` 결과를 2분 동안 캐시한다. 팝업의 `새로고침`은 `?refresh=1`로 강제 갱신한다.

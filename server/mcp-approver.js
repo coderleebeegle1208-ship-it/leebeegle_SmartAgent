@@ -43,6 +43,30 @@ async function captureForPhone(args) {
   return data;
 }
 
+async function sendFileToPhone(args) {
+  const res = await fetch(`${URL_BASE}/internal/send_file`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify({ agentId: Number(AGENT_ID), ...args }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `send_file failed (${res.status})`);
+  return data;
+}
+
+const SEND_FILE_TOOL = {
+  name: 'send_file',
+  description: 'Sends a video (mp4/mov/webm/m4v) or image file from this PC into the phone chat so the owner can play or view it right there. Use it for finished videos, rendered clips, or generated images instead of describing them or pasting a path. Max 400MB.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      file: { type: 'string', description: 'Path to the file (absolute, or relative to the workspace)' },
+      caption: { type: 'string', description: 'One short Korean sentence shown under the video/image' },
+    },
+    required: ['file'],
+  },
+};
+
 const RESTART_TOOL = {
   name: 'restart_server',
   description: 'Restarts the phone dashboard server (this app, leebeegle_SmartAgent) after its code was changed. The restart waits until your current turn ends, then relaunches automatically within ~5 seconds. Call this instead of killing processes, running node server/index.js, or starting scheduled tasks yourself; those break the phone connection.',
@@ -69,17 +93,31 @@ const CAPTURE_TOOL = {
   },
 };
 
-const PROGRESS_TOOL = {
-  name: 'progress',
-  description: "Shows a progress bar on the owner's phone for a long task. Two ways: (1) pass `percent` (0-100) and a short Korean `label` each time a step finishes; (2) for a job you started in the background with its output redirected to a log file, pass `log_file` once — the server then tails that file every 30 s, reads the latest 'NN%' or 'n/m' it prints, shows it on the phone even after your turn ends, and notifies the owner when it reaches 100% or prints done/완료. Prefer (2) for video/audio generation, rendering, uploads, batches.",
+const RUN_JOB_TOOL = {
+  name: 'run_job',
+  description: "Hands a long-running command (video/audio generation, rendering, uploads, builds, batches, anything over ~2 minutes) to the server. The server launches it in the background, keeps its output in a log file, and when it exits — success, failure, or 20 minutes without output — it automatically calls you again with the log tail so you can verify the result, send it to the phone, or fix the cause and retry (up to 3 attempts per label). After calling this, report '시작했습니다' and END YOUR TURN; do not sleep, poll, or tail the log.",
   inputSchema: {
     type: 'object',
     properties: {
-      percent: { type: 'number', description: '0-100' },
-      label: { type: 'string', description: 'Short Korean name of the task, e.g. "쇼츠 영상 만드는 중"' },
-      log_file: { type: 'string', description: 'Path to the log file of a background job (absolute, or relative to the workspace)' },
-      done: { type: 'boolean', description: 'true when the task is finished' },
+      command: { type: 'string', description: 'The full shell command to run, e.g. "python make_video.py --ep 12"' },
+      label: { type: 'string', description: 'Short Korean name of the job, e.g. "12화 영상 생성". Reuse the same label when retrying.' },
+      cwd: { type: 'string', description: 'Working directory (absolute or relative to the workspace). Default: the workspace.' },
+      shell: { type: 'string', enum: ['bash', 'powershell', 'cmd'], description: 'Which shell runs the command. Default bash (Git Bash).' },
     },
+    required: ['command', 'label'],
+  },
+};
+const WATCH_JOB_TOOL = {
+  name: 'watch_job',
+  description: "For a background job you already started some other way: registers its log file so the server watches it after your turn ends and calls you again when the log says done/완료, prints an error and stops changing, or (if `pid` is given) the process exits. Prefer run_job for new jobs.",
+  inputSchema: {
+    type: 'object',
+    properties: {
+      log_file: { type: 'string', description: 'Path to the log file (absolute, or relative to the workspace)' },
+      label: { type: 'string', description: 'Short Korean name of the job' },
+      pid: { type: 'number', description: 'Windows process id, if known' },
+    },
+    required: ['log_file', 'label'],
   },
 };
 
@@ -128,7 +166,9 @@ rl.on('line', async (line) => {
             },
           },
           CAPTURE_TOOL,
-          PROGRESS_TOOL,
+          SEND_FILE_TOOL,
+          RUN_JOB_TOOL,
+          WATCH_JOB_TOOL,
           RESTART_TOOL,
         ],
       },
@@ -145,19 +185,28 @@ rl.on('line', async (line) => {
     } catch (err) {
       send({ jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text: `재시작 예약 실패: ${err.message}` }] } });
     }
-  } else if (method === 'tools/call' && params?.name === 'progress') {
+  } else if (method === 'tools/call' && (params?.name === 'run_job' || params?.name === 'watch_job')) {
     try {
-      const res = await fetch(`${URL_BASE}/internal/progress`, {
+      const res = await fetch(`${URL_BASE}/internal/jobs`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
-        body: JSON.stringify({ agentId: Number(AGENT_ID), ...(params?.arguments || {}) }),
+        body: JSON.stringify({ agentId: Number(AGENT_ID), mode: params.name === 'run_job' ? 'run' : 'watch', ...(params?.arguments || {}) }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || `progress failed (${res.status})`);
-      const p = data.progress || {};
-      send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: p.log_file ? `폰에 진행률을 띄웠습니다 (${p.label}). 로그 파일을 서버가 계속 지켜보니 더 기다리거나 확인하지 말고 턴을 끝내세요.` : `진행률 ${p.percent}% 표시했습니다.` }] } });
+      if (!res.ok) throw new Error(data.error || `${params.name} failed (${res.status})`);
+      const j = data.job || {};
+      send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `배경 작업 "${j.label}"을(를) ${params.name === 'run_job' ? `띄웠습니다 (PID ${j.pid || '?'}, 로그 ${j.log_file})` : `지켜봅니다 (로그 ${j.log_file})`}. 끝나면 서버가 로그와 함께 당신을 자동으로 다시 부르니, 기다리거나 로그를 확인하지 말고 "시작했습니다"라고 보고한 뒤 턴을 끝내세요.` }] } });
     } catch (err) {
-      send({ jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text: `진행률 표시 실패: ${err.message}` }] } });
+      send({ jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text: `배경 작업 등록 실패: ${err.message}` }] } });
+    }
+  } else if (method === 'tools/call' && params?.name === 'send_file') {
+    const args = params?.arguments || {};
+    try {
+      const r = await sendFileToPhone(args);
+      const sec = r.duration ? ` · ${Math.round(r.duration)}초` : '';
+      send({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `폰 채팅에 ${r.kind === 'video' ? '영상' : '사진'}을 보냈습니다 (${Math.round(r.size / 1048576)}MB${sec}). 답변에 파일 경로를 적을 필요는 없습니다.` }] } });
+    } catch (err) {
+      send({ jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text: `파일 보내기 실패: ${err.message}` }] } });
     }
   } else if (method === 'tools/call' && params?.name === 'capture') {
     const args = params?.arguments || {};

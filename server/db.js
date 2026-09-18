@@ -122,6 +122,11 @@ for (const [table, col, def] of [
   ['agents', 'auto_failover', 'INTEGER NOT NULL DEFAULT 0'],
   ['agents', 'collab_mode', 'INTEGER NOT NULL DEFAULT 0'],
   ['agents', 'collab_stage', 'TEXT'],
+  ['agents', 'cross_plan', 'INTEGER NOT NULL DEFAULT 0'],      // 단일 모델: 다른 제공자가 계획서를 먼저 쓴다
+  ['agents', 'codex_plan_model', 'TEXT'],                     // Codex가 계획을 맡을 때의 모델 (null → 기본)
+  ['agents', 'codex_plan_effort', 'TEXT'],                    // null → 'high'
+  ['agents', 'plan_debate', 'INTEGER NOT NULL DEFAULT 0'],     // 계획 분담 + 합의: 실행 모델이 초안을 검토하고 계획 모델이 최종안을 쓴다
+  ['agents', 'plan_dispute', 'INTEGER NOT NULL DEFAULT 0'],    // 합의 실패: 대표가 계획 담당 안·검토 담당 안 중 고를 때까지 대기
   ['approvals', 'risk', 'TEXT'],                              // 'outside' → 작업 폴더 밖 변경, 묶음 허용에서 제외
   ['approvals', 'level', 'TEXT'],                             // safe | caution | danger → 카드 색깔
 ]) {

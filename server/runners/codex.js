@@ -26,7 +26,7 @@ export function codexApproverConfig(cfg) {
     `mcp_servers.approver.command=${JSON.stringify(process.execPath)}`,
     `mcp_servers.approver.args=${JSON.stringify([path.join(SERVER_DIR, 'mcp-approver.js')])}`,
     'mcp_servers.approver.env_vars=["APPROVER_URL","APPROVER_TOKEN","APPROVER_AGENT_ID"]',
-    'mcp_servers.approver.enabled_tools=["capture","restart_server"]',
+    'mcp_servers.approver.enabled_tools=["capture","restart_server","run_job","watch_job","send_file"]',
     'mcp_servers.approver.default_tools_approval_mode="auto"',
   ];
 }
@@ -86,7 +86,7 @@ function findOnPath(names) {
  * already has it in context but tends to drift back to a plain engineer tone, so it gets the
  * short reminder instead of paying for the full ~560-token guide again. */
 export function codexStyledText(text, agent, opts = {}) {
-  if (opts.phase === 'review') return text;
+  if (opts.phase === 'review' || opts.stage === 'plan') return text; // 계획서도 실행 모델이 읽는다
   return agent.session_id ? withPhoneReminder(text) : withPhoneStyle(text);
 }
 

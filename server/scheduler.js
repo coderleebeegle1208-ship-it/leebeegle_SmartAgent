@@ -10,7 +10,7 @@ import { sendPush } from './push.js';
 import { startPrompt } from './runners/index.js';
 import { buildDigest, digestPushText, localDate } from './digest.js';
 import { clearHeld, heldNotifications, heldSummary, isQuietNow } from './quiet.js';
-import { tickProgress } from './progress.js';
+import { tickJobs } from './jobs.js';
 
 const GRACE_MS = 15 * 60 * 1000;
 export const DEFAULT_DIGEST_TIME = '21:00';
@@ -118,7 +118,7 @@ export function tick(cfg, now = Date.now()) {
   }
   try { backupIfDue(cfg, now); } catch (e) { console.error('[backup]', e.message); }
   try { flushHeldIfMorning(now); } catch (e) { console.error('[quiet]', e.message); }
-  try { tickProgress(now); } catch (e) { console.error('[progress]', e.message); }
+  try { tickJobs(now); } catch (e) { console.error('[jobs]', e.message); }
 }
 
 /** 방해금지 시간이 끝나면 참아 둔 알림을 한 장으로 모아 보낸다. */

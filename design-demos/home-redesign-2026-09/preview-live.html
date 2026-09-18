@@ -14,14 +14,14 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+KR:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="../../public/style.css">
 </head>
 <body>
   <header class="topbar" id="topbar">
     <div class="topbar-inner">
       <button class="icon-btn" id="btn-back" hidden aria-label="뒤로"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg></button>
       <div class="brand">
-        <span class="logo"><img src="/icon.svg" alt="" width="26" height="26"><span class="dot" id="conn-dot"></span></span>
+        <span class="logo"><img src="../../public/icon.svg" alt="" width="26" height="26"><span class="dot" id="conn-dot"></span></span>
         <span id="topbar-title">leebeegle_SmartAgent</span>
       </div>
       <button class="icon-btn" id="btn-refresh" aria-label="새로고침"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></button>
@@ -388,6 +388,28 @@
   </dialog>
 
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
-  <script src="/app.js"></script>
+  <script>
+(() => {
+  localStorage.setItem('ar_token', 'preview');
+  localStorage.setItem('ar_collapsed', JSON.stringify([3]));
+  const STATE = {"workspaces": [{"id": 1, "name": "leebeegle_SmartAgent", "path": "C:\\Users\\leebe\\Desktop\\leebeegle_SmartAgent", "pinned": 1, "repo": {"name": "leebeegle_SmartAgent", "repo": "lucky-tstore/leebeegle_SmartAgent", "webUrl": "https://github.com/lucky-tstore/leebeegle_SmartAgent"}}, {"id": 2, "name": "youtube-factory", "path": "C:\\Users\\leebe\\Desktop\\youtube-factory", "pinned": 0, "repo": null}, {"id": 3, "name": "shop-landing", "path": "C:\\Users\\leebe\\Desktop\\shop-landing", "pinned": 0, "repo": {"name": "shop-landing", "repo": "lucky-tstore/shop-landing"}}], "agents": [{"id": 11, "workspace_id": 1, "name": "홈화면 개편", "kind": "claude", "status": "needs_attention", "updated_at": 1789727062345, "pending_approvals": 1, "last_response": ""}, {"id": 12, "workspace_id": 1, "name": "스크롤 버그 수정", "kind": "codex", "status": "working", "updated_at": 1789726902345, "queued": 1, "last_response": "public/app.js 수정하는 중"}, {"id": 13, "workspace_id": 1, "name": "텔레그램 연동", "kind": "claude", "status": "done", "updated_at": 1789719882345, "last_response": "네, 처리했습니다. 이제 텔레그램으로도 승인할 수 있습니다."}, {"id": 21, "workspace_id": 2, "name": "쇼츠 영상 생성", "kind": "claude", "status": "working", "updated_at": 1789726362345, "jobs": [{"label": "render-shorts"}], "last_response": "영상 렌더링 중입니다"}, {"id": 22, "workspace_id": 2, "name": "썸네일 만들기", "kind": "codex", "status": "error", "updated_at": 1789723482345, "last_error": "ffmpeg를 찾을 수 없습니다"}, {"id": 31, "workspace_id": 3, "name": "랜딩 시안", "kind": "claude", "status": "done", "updated_at": 1789640682345, "last_response": "시안 3개를 보냈습니다."}], "counts": {"all": 6, "needs_attention": 1, "working": 2, "done": 2, "error": 1}, "computer": {"name": "DESKTOP-LEE", "connected": true, "platform": "win32", "cpu": 23, "mem": 61}}, USAGE = {"ok": true, "items": [{"label": "5시간 한도 (current session)", "pct": 34, "resets": "오후 4:00"}, {"label": "주간 전체 (current week, all models)", "pct": 72, "resets": "9월 22일"}, {"label": "Fable 주간", "pct": 18, "resets": "9월 22일"}]}, DIGEST = {"totals": {"requests": 9, "files": 14, "errors": 1, "cost": 3.2}, "agents": [{"id": 11}, {"id": 12}, {"id": 13}, {"id": 21}], "settings": {"enabled": true, "time": "18:00"}}, AGENT13 = {"agent": {"id": 13, "workspace_id": 1, "name": "텔레그램 연동", "kind": "claude", "status": "done", "updated_at": 1789719882345, "last_response": "네, 처리했습니다. 이제 텔레그램으로도 승인할 수 있습니다.", "running": false, "collab_mode": 0, "blanket_allow": 0}, "workspace": {"id": 1, "name": "leebeegle_SmartAgent", "path": "C:\\Users\\leebe\\Desktop\\leebeegle_SmartAgent", "pinned": 1, "repo": {"name": "leebeegle_SmartAgent", "repo": "lucky-tstore/leebeegle_SmartAgent", "webUrl": "https://github.com/lucky-tstore/leebeegle_SmartAgent"}}, "approvals": [], "queue": [], "usage_summary": null, "messages": [{"id": 1, "role": "user", "content": "텔레그램으로도 승인할 수 있게 해줘", "created_at": 1789719582345}, {"id": 2, "role": "tool", "content": "Read server/index.js", "created_at": 1789719682345, "meta": "{\"tool\": \"Read\", \"input\": {\"file_path\": \"server/index.js\"}}"}, {"id": 3, "role": "assistant", "content": "네, 처리했습니다. 이제 텔레그램으로도 승인할 수 있습니다.\n- 승인 요청이 오면 텔레그램에 버튼이 함께 옵니다.\n- **봇 토큰은 설정 창에서 한 번만 넣어 주세요.**", "created_at": 1789719882345, "meta": "{\"provider\": \"claude\"}"}]};
+  // 대화 미리보기: 시작 주소에 ?agent=13 이 있는 것처럼 보이게 한다 (file:// 에서는 주소를 못 바꾸므로)
+  if (document.title.includes('대화')) { const O = URLSearchParams; window.URLSearchParams = class extends O { constructor(i) { super(i === location.search ? '?agent=13' : i); } }; }
+  history.pushState = () => {}; history.replaceState = () => {};
+  const ok = (data) => Promise.resolve(new Response(JSON.stringify(data), { status: 200, headers: { 'content-type': 'application/json' } }));
+  window.fetch = (url) => {
+    const u = String(url);
+    if (u.includes('/api/state')) return ok(STATE);
+    if (u.includes('/api/usage')) return ok(USAGE);
+    if (u.includes('/api/digest')) return ok(DIGEST);
+    if (u.includes('/api/agents/13')) return ok(AGENT13);
+    if (u.includes('/api/skills')) return ok([]);
+    return ok({});
+  };
+  window.WebSocket = class { constructor() { setTimeout(() => this.onopen && this.onopen(), 0); } send() {} close() {} };
+  if ('serviceWorker' in navigator) Object.defineProperty(navigator, 'serviceWorker', { value: undefined });
+})();
+</script>
+<script src="../../public/app.js"></script>
 </body>
 </html>

@@ -98,6 +98,7 @@ export function blanketAllow(agentId) {
 export function summarizeInput(toolName, input) {
   if (!input || typeof input !== 'object') return '';
   if (toolName === 'Bash') return input.command || '';
+  if (toolName === 'mcp__approver__run_job') return `${input.label ? `[${input.label}] ` : ''}${input.command || ''}`;
   if (['Write', 'Edit', 'Read', 'NotebookEdit'].includes(toolName)) return input.file_path || '';
   if (toolName === 'AskUserQuestion') return (input.questions || []).map((q) => q.question).join(' / ');
   const s = JSON.stringify(input);

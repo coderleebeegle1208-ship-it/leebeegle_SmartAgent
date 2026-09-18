@@ -179,7 +179,25 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
   const child = spawn(bin, args, { cwd: workspace.path, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
 
   child.stdin.on('error', () => {});
-  child.stdin.end(claudeStdinText(text, opts));
+  const userLine = (t) => JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: t }] } }) + '\n';
+  child.stdin.write(userLine(claudeStdinText(text, opts)));
+  // 결과 하나가 올 때마다 남은 입력이 없으면 stdin을 닫아 프로세스를 끝낸다. 끼워 넣은 지시가 있으면
+  // 같은 프로세스가 이어서 처리하고 결과를 한 번 더 낸다.
+  let pendingInputs = 1;
+  let stdinClosed = false;
+  let closeTimer = null;
+  const closeStdin = () => {
+    if (stdinClosed) return;
+    stdinClosed = true;
+    try { child.stdin.end(); } catch {}
+    // stdin을 닫아도 안 끝나면(드묾) 강제로 끝낸다.
+    closeTimer = setTimeout(() => { try { child.kill(); } catch {} }, 20_000);
+  };
+  child.steer = (t) => {
+    if (stdinClosed || !t?.trim()) return false;
+    pendingInputs += 1;
+    try { child.stdin.write(userLine(claudeStdinText(t, opts))); return true; } catch { pendingInputs -= 1; return false; }
+  };
 
   let gotResult = false;
   let lastContext = 0;
@@ -244,6 +262,8 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
     }
     if (ev.type === 'result') {
       gotResult = true;
+      pendingInputs -= 1;
+      if (pendingInputs <= 0) closeStdin();
       hooks.onResult?.({
         ok: !ev.is_error && ev.subtype === 'success',
         text: ev.result || '',
@@ -272,6 +292,7 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
     exitOnce({ code: -1, error: `실행 실패: ${err.message}`, gotResult });
   });
   child.on('close', (code) => {
+    if (closeTimer) clearTimeout(closeTimer);
     exitOnce({ code, error: gotResult ? null : stderrTail.trim() || `프로세스 종료 (code ${code})`, gotResult });
   });
 
@@ -294,7 +315,9 @@ export function buildClaudeArgs(agent, mcpPath, opts = {}) {
   // --strict-mcp-config keeps every turn from also loading the user's global ~/.claude.json MCP
   // servers (unauthorized ones still ship their tool definitions in the prefix); the approver
   // server above still loads because it's passed via --mcp-config.
-  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-prompt-tool', 'mcp__approver__approve', '--mcp-config', mcpPath, '--strict-mcp-config', '--allowedTools', 'mcp__approver__capture', 'mcp__approver__progress', 'mcp__approver__restart_server', 'WebFetch'];
+  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-prompt-tool', 'mcp__approver__approve', '--mcp-config', mcpPath, '--strict-mcp-config', '--allowedTools', 'mcp__approver__capture', 'mcp__approver__watch_job', 'mcp__approver__restart_server', 'WebFetch'];
+  // 입력을 stream-json으로 받으면 stdin을 열어 둘 수 있어, 처리 중에도 대표의 지시를 끼워 넣을 수 있다(steer).
+  args.push('--input-format', 'stream-json');
   const isPlanOrReview = opts.stage === 'plan' || opts.phase === 'review';
   // Plan output goes to ExitPlanMode (read by the executor turn, not the owner) and review output
   // goes to the other model, so neither needs the phone-tone guide — skipping it there also keeps

@@ -9,7 +9,6 @@ import { explainError, errorMessageText } from '../errors.js';
 import { emit } from '../bus.js';
 import { sendPush } from '../push.js';
 import { expireApprovals, setBlanketAllow } from '../approvals.js';
-import { clearProgress } from '../progress.js';
 import { createRunWatch, watchLimits, describeVerdict } from '../watchdog.js';
 import { runClaude, runClaudeOnce, runClaudeOnceText } from './claude.js';
 import { findCodexEntry, runCodex } from './codex.js';
@@ -41,6 +40,21 @@ export function stageEfforts(agent) {
 function withEffort(model, effort) {
   const name = modelLabel(model);
   return effort ? `${name} (강도 ${EFFORT_LABEL[effort] || effort})` : name;
+}
+
+// 단일 모델 + 계획 분담: 다른 제공자가 계획서를 먼저 쓰고, 원래 모델이 그 계획대로 실행한다.
+// Claude가 계획을 맡으면 교차 모델의 계획 모델·강도(plan_model/plan_effort)를 그대로 쓰고,
+// Codex가 맡으면 전용 설정(codex_plan_model/codex_plan_effort)을 쓴다.
+export function usesCrossPlan(agent) {
+  return !!agent?.cross_plan && (agent.kind === 'codex' || agent.pipeline !== 'auto');
+}
+/** 계획 합의: 계획 분담 위에 "실행 모델이 초안 검토 → 계획 모델이 최종안" 왕복을 한 번 얹는다. */
+export function usesPlanDebate(agent) {
+  return usesCrossPlan(agent) && !!agent.plan_debate;
+}
+export function crossPlanner(agent) {
+  if (agent.kind === 'claude') return { kind: 'codex', model: agent.codex_plan_model || codexDefaults().model, effort: agent.codex_plan_effort || 'high' };
+  return { kind: 'claude', model: agent.plan_model || 'fable', effort: stageEfforts(agent).plan };
 }
 
 /** Remembers the concrete model id the CLI reported, so the UI can show what an alias resolved to. */
@@ -150,6 +164,8 @@ function runTurn(agentId, text, cfg, opts = {}) {
       },
       onMessage: (role, content, meta) => {
         if (!Agents.get(agentId)) return;
+        // Codex 계획 담당: 마지막 답변만 계획 카드로 저장하므로 중간 답변은 대화에 남기지 않는다.
+        if (opts.captureAs === 'plan' && role === 'assistant') return;
         const m = Messages.add(agentId, role, content, { ...(meta || {}), provider, ...(opts.phase ? { phase: opts.phase } : {}) });
         emit('message', { agent_id: agentId, message: m });
       },
@@ -318,6 +334,155 @@ function execPrompt(agentId, sinceMessageId) {
   return base + latestAttachmentBlock(agentId) + latestSkillPointer(agentId);
 }
 
+/** 계획 이견에서 대표가 검토 담당 손을 들어준 경우: 최종안을 바탕으로 하되, 갈린 지점은 검토 의견을 따른다. */
+function execPromptReviewerSide(agentId) {
+  const plan = findPlanMessage(agentId, 0);
+  const review = Messages.forAgent(agentId, 50).filter((m) => m.role === 'plan_review').at(-1);
+  if (!plan || !review) return execPrompt(agentId, 0);
+  const base = `아래 계획을 실행하되, 계획 담당과 검토 담당의 의견이 갈린 지점은 대표가 [검토 의견] 쪽을 택했다. 그 지점은 검토 의견대로 계획을 고쳐서 실행하고, 나머지는 계획대로 해. 계획에 없는 작업은 하지 말고, 끝나면 무엇을 바꿨는지 한국어로 짧게 요약해.\n\n[계획]\n${plan.content}\n\n[검토 의견 · 갈린 지점은 이쪽을 따를 것]\n${review.content}`;
+  return base + latestAttachmentBlock(agentId) + latestSkillPointer(agentId);
+}
+
+/** Codex has no ExitPlanMode, so its planner turn just answers with the plan text (read-only sandbox). */
+export function codexPlannerPrompt(agentId, text, { skill } = {}) {
+  const recent = compactConversation(Messages.recentByRole(agentId, CONVO_ROLES, 30), 5000);
+  const skillNote = skill ? ' 실행자가 열어야 할 스킬 폴더 파일은 절대 경로로 계획에 적어라.' : '';
+  return `${recent ? `[최근 대화 요약]\n${recent}\n\n` : ''}[요청]\n${text}\n\n당신은 계획 담당이다. 위 요청을 실행하기 위한 계획만 세워라. 파일을 수정하거나 상태를 바꾸는 명령은 실행하지 말고, 코드를 읽어 확인만 해라. 계획은 한국어로, 다른 모델(실행자)이 그대로 따를 수 있게 핵심만 3,000자 이내로 적어라. 코드 전문은 넣지 말고 바꿀 파일·함수·내용만 적어라. 최종 답변에는 계획 본문만 써라.${skillNote}`;
+}
+
+/** 계획 검토(실행 담당): 대화 전체가 아니라 요청과 계획서만 받는다 — 토큰 절약. */
+export function planReviewPrompt(text, planText) {
+  return `[요청]\n${text}\n\n[계획 초안]\n${planText}\n\n당신은 이 계획을 그대로 실행할 담당자다. 실행 전에 초안을 검토해라. 파일을 수정하지 말고 코드를 읽어 확인만 해라. 초안대로 실행해도 문제없으면 첫 줄에 "판정: 동의"라고만 쓰고 한두 문장으로 이유를 덧붙여라. 고쳐야 할 점이 있으면 첫 줄에 "판정: 수정 제안"이라 쓰고, 그 아래 "- "로 시작하는 항목으로 무엇을 왜 어떻게 바꿔야 하는지 핵심만 1,500자 이내로 적어라. 사소한 표현 차이는 지적하지 말고, 실행 결과가 달라질 부분만 짚어라. 한국어로, 최종 답변에는 판정과 의견만 써라.`;
+}
+/** 최종안(계획 담당): 검토 의견을 반영하되, 동의 못 하는 지점은 "이견"으로 표시해 대표가 고를 수 있게 한다. */
+export function planFinalPrompt(text, planText, reviewText, plannerKind) {
+  const submit = plannerKind === 'claude' ? ' 파일을 수정하지 말고, 최종 계획이 완성되면 ExitPlanMode로 제출해라.' : ' 파일을 수정하거나 상태를 바꾸는 명령은 실행하지 말고, 최종 답변에는 최종 계획 본문만 써라.';
+  return `[요청]\n${text}\n\n[당신이 쓴 계획 초안]\n${planText}\n\n[실행 담당의 검토 의견]\n${reviewText}\n\n검토 의견 중 타당한 것은 반영해 최종 계획을 써라. 계획 본문의 첫 줄은 반드시 "결론: 합의" 또는 "결론: 이견" 중 하나다. 검토 의견을 모두 받아들였거나 남은 차이가 사소하면 "결론: 합의". 실행 결과가 달라질 만큼 중요한 지점에서 검토 의견에 동의할 수 없으면 "결론: 이견"이라 쓰고, 둘째 줄부터 "이견 사유:"로 어느 지점을 왜 반대하는지 3줄 이내로 적은 뒤 당신의 최종 계획을 이어 써라. 계획은 한국어로, 실행자가 그대로 따를 수 있게 핵심만 3,000자 이내로, 코드 전문 없이 바꿀 파일·함수·내용만 적어라.${submit}`;
+}
+/** 검토 답변 첫 줄의 판정. 못 읽으면 수정 제안으로 본다(초안을 그냥 밀어붙이는 쪽보다 안전). */
+export function parsePlanVerdict(reviewText) {
+  const first = String(reviewText || '').split('\n').map((l) => l.trim()).find(Boolean) || '';
+  return /판정\s*[:：]\s*동의/.test(first) ? 'agree' : 'revise';
+}
+/** 최종안 첫 줄의 결론. "이견"이 아니면 합의로 본다. */
+export function parsePlanConclusion(planText) {
+  const first = String(planText || '').split('\n').map((l) => l.trim()).find(Boolean) || '';
+  return /결론\s*[:：]\s*이견/.test(first) ? 'dispute' : 'agree';
+}
+
+/** 계획 분담 + 합의: 실행 담당이 초안을 검토하고(동의면 끝), 계획 담당이 의견을 반영해 최종안을 쓴다.
+ * 최종안이 "이견"이면 대표가 어느 안으로 실행할지 고를 때까지 멈춘다(paused). 검토·최종안을 못 받으면 초안대로 간다. */
+async function runPlanDebate(agentId, text, cfg, planner, planStartMessageId) {
+  const agent = Agents.get(agentId);
+  const plan = findPlanMessage(agentId, planStartMessageId);
+  if (!agent || !plan) return {};
+  const reviewer = agent.kind === 'codex'
+    ? { kind: 'codex', model: agent.codex_model || codexDefaults().model, effort: agent.codex_effort || codexDefaults().effort }
+    : { kind: 'claude', model: agent.model, effort: agent.effort || null };
+  note(agentId, `계획 검토 · ${KIND_LABEL[reviewer.kind]} ${withEffort(reviewer.model, reviewer.effort)}가 초안을 읽고 의견을 내는 중…`);
+  const reviewPrompt = planReviewPrompt(text, plan.content);
+  const reviewRun = reviewer.kind === 'claude'
+    ? await runTurn(agentId, reviewPrompt, cfg, { kind: 'claude', stage: 'plan', fresh: true, model: reviewer.model, effort: reviewer.effort, tools: ['Read', 'Glob', 'Grep'], permissionMode: 'dontAsk', disallowedTools: ['Write', 'Edit', 'NotebookEdit', 'Bash'], captureAs: 'plan_review', budgetUsd: cfg.planBudgetUsd || undefined })
+    : await runTurn(agentId, reviewPrompt, cfg, { kind: 'codex', stage: 'plan', fresh: true, model: reviewer.model, effort: reviewer.effort, sandbox: 'read-only', captureAs: 'plan_review' });
+  if (!Agents.get(agentId)) return { deleted: true };
+  if (reviewRun?.stopped) return { failed: reviewRun };
+  const reviewText = String(reviewRun?.text || '').trim();
+  if (!reviewRun?.ok || !reviewText) {
+    note(agentId, '검토 의견을 받지 못함 → 초안대로 진행');
+    return {};
+  }
+  const verdict = parsePlanVerdict(reviewText);
+  const rm = Messages.add(agentId, 'plan_review', reviewText, { provider: reviewer.kind, verdict });
+  emit('message', { agent_id: agentId, message: rm });
+  if (verdict === 'agree') {
+    note(agentId, '검토 동의 → 초안대로 진행');
+    return {};
+  }
+
+  note(agentId, `최종안 · ${KIND_LABEL[planner.kind]} ${withEffort(planner.model, planner.effort)}가 검토 의견을 반영해 최종 계획을 쓰는 중…`);
+  const finalStartId = Messages.latestId(agentId);
+  const finalPrompt = planFinalPrompt(text, plan.content, reviewText, planner.kind);
+  let finalRun;
+  if (planner.kind === 'claude') {
+    planPhase.add(agentId);
+    try {
+      finalRun = await runTurn(agentId, finalPrompt, cfg, { kind: 'claude', stage: 'plan', fresh: true, model: planner.model, effort: planner.effort, permissionMode: 'plan', budgetUsd: cfg.planBudgetUsd || undefined });
+    } finally {
+      planPhase.delete(agentId);
+    }
+  } else {
+    finalRun = await runTurn(agentId, finalPrompt, cfg, { kind: 'codex', stage: 'plan', fresh: true, model: planner.model, effort: planner.effort, sandbox: 'read-only', captureAs: 'plan' });
+    if (finalRun?.ok && String(finalRun.text || '').trim() && Agents.get(agentId)) {
+      const m = Messages.add(agentId, 'plan', finalRun.text.trim(), { provider: 'codex', final: true });
+      emit('message', { agent_id: agentId, message: m });
+    }
+  }
+  if (!Agents.get(agentId)) return { deleted: true };
+  if (finalRun?.stopped) return { failed: finalRun };
+  const finalPlan = Messages.after(agentId, finalStartId).filter((m) => m.role === 'plan').at(-1);
+  if (!finalPlan) {
+    note(agentId, '최종안을 받지 못함 → 초안대로 진행');
+    return {};
+  }
+  if (parsePlanConclusion(finalPlan.content) !== 'dispute') {
+    note(agentId, '합의 완료 → 최종안대로 진행');
+    return {};
+  }
+  const current = update(agentId, { status: 'needs_attention', pending_plan: 1, plan_dispute: 1, last_response: finalPlan.content });
+  note(agentId, `계획 이견 · ${KIND_LABEL[planner.kind]}(계획)와 ${KIND_LABEL[reviewer.kind]}(검토)의 의견이 갈렸습니다. 어느 안으로 실행할지 골라 주세요.`);
+  push(current, '계획 이견 · 결정 필요', `${KIND_LABEL[planner.kind]} 계획 담당과 ${KIND_LABEL[reviewer.kind]} 검토 담당의 의견이 갈렸습니다.\n\n${finalPlan.content}`);
+  flushUsage(agentId);
+  return { paused: true };
+}
+
+/** 단일 모델 + 계획 분담: 다른 제공자가 계획서를 쓴다. 계획이 나오면 그 계획을 담은 실행 지시문을,
+ * 계획 담당이 멈추거나 에이전트가 사라지면 failed/deleted를 돌려준다. 계획서를 못 받은 경우는 계획 없이 바로 실행한다. */
+async function runCrossPlan(agentId, text, cfg, extra = {}) {
+  const agent = Agents.get(agentId);
+  const planner = crossPlanner(agent);
+  const execLabel = agent.kind === 'codex'
+    ? `Codex ${withEffort(agent.codex_model || codexDefaults().model, agent.codex_effort || codexDefaults().effort)}`
+    : `Claude ${withEffort(agent.model, agent.effort)}`;
+  if (planner.kind === 'codex' && !findCodexEntry()) {
+    note(agentId, `Codex CLI를 찾지 못해 계획 없이 ${execLabel} 바로 실행`);
+    return { prompt: text, planStartMessageId: null };
+  }
+  note(agentId, `계획 분담 · ${KIND_LABEL[planner.kind]} ${withEffort(planner.model, planner.effort)}가 계획서를 쓰는 중…`);
+  const planStartMessageId = Messages.latestId(agentId);
+  let planRun;
+  if (planner.kind === 'claude') {
+    planPhase.add(agentId);
+    try {
+      planRun = await runTurn(agentId, plannerPrompt(agentId, text, { skill: extra.skill }), cfg, { kind: 'claude', stage: 'plan', fresh: true, model: planner.model, effort: planner.effort, permissionMode: 'plan', budgetUsd: cfg.planBudgetUsd || undefined });
+    } finally {
+      planPhase.delete(agentId);
+    }
+  } else {
+    planRun = await runTurn(agentId, codexPlannerPrompt(agentId, text, { skill: extra.skill }), cfg, { kind: 'codex', stage: 'plan', fresh: true, model: planner.model, effort: planner.effort, sandbox: 'read-only', images: extra.images, captureAs: 'plan' });
+    if (planRun?.ok && String(planRun.text || '').trim() && Agents.get(agentId)) {
+      const m = Messages.add(agentId, 'plan', planRun.text.trim(), { provider: 'codex' });
+      emit('message', { agent_id: agentId, message: m });
+    }
+  }
+  if (!Agents.get(agentId)) return { deleted: true };
+  if (!planRun || planRun.stopped) return { failed: planRun || { ok: false, text: '계획 단계가 끝나지 않았습니다.' } };
+  const hasPlan = Messages.after(agentId, planStartMessageId).some((m) => m.role === 'plan');
+  if (!hasPlan) {
+    // 계획 담당의 한도·오류로 이 지시 전체를 막지는 않는다: 실행 모델이 계획 없이 그대로 맡는다.
+    const why = isUsageLimitError(planRun) ? `${KIND_LABEL[planner.kind]} 한도 도달` : isPlanBudgetExceeded(planRun) ? '계획 예산 초과' : '계획서를 받지 못함';
+    note(agentId, `${why} → 계획 없이 ${execLabel} 바로 실행`);
+    return { prompt: text, planStartMessageId: null };
+  }
+  if (extra.debate && usesPlanDebate(agent)) {
+    const d = await runPlanDebate(agentId, text, cfg, planner, planStartMessageId);
+    if (d.deleted) return { deleted: true };
+    if (d.failed) return { failed: d.failed };
+    if (d.paused) return { paused: true };
+  }
+  note(agentId, `계획 완료 → ${execLabel} 실행`);
+  return { prompt: execPrompt(agentId, planStartMessageId), planStartMessageId };
+}
+
 export function isUsageLimitError(result) {
   if (!result || result.ok) return false;
   const text = [result.text, result.subtype, result.error].filter(Boolean).join(' ').toLowerCase();
@@ -381,7 +546,7 @@ async function completeOrFailover(agentId, result, originalText, cfg, allowFailo
   return runPipeline(agentId, continuation, cfg, { allowFailover: false });
 }
 
-async function runProviderWork(agentId, text, cfg, { kind, phase, autoRoute = false, triageText = null }) {
+async function runProviderWork(agentId, text, cfg, { kind, phase, autoRoute = false, triageText = null, crossPlan = false }) {
   let agent = Agents.get(agentId);
   if (!agent) return null;
   const workspace = Workspaces.get(agent.workspace_id);
@@ -417,6 +582,13 @@ async function runProviderWork(agentId, text, cfg, { kind, phase, autoRoute = fa
     return runTurn(agentId, execPrompt(agentId, planStartMessageId), cfg, { kind, phase, stage: 'exec', model: agent.exec_model, effort: efforts.exec });
   }
 
+  if (crossPlan && phase === 'implement' && usesCrossPlan(agent)) {
+    const cp = await runCrossPlan(agentId, text, cfg);
+    if (cp.deleted) return null;
+    if (cp.failed) return cp.failed;
+    text = cp.prompt;
+  }
+
   if (kind === 'claude') {
     const model = phase === 'review'
       ? agent.plan_model || 'sonnet'
@@ -438,8 +610,8 @@ async function runProviderWork(agentId, text, cfg, { kind, phase, autoRoute = fa
   return runTurn(agentId, text, cfg, { kind, phase, ...(phase === 'review' ? { sandbox: 'read-only', fresh: true } : {}) });
 }
 
-async function runWorkWithLimitFallback(agentId, text, cfg, kind, phase, autoRoute, triageText = null) {
-  let result = await runProviderWork(agentId, text, cfg, { kind, phase, autoRoute, triageText });
+async function runWorkWithLimitFallback(agentId, text, cfg, kind, phase, autoRoute, triageText = null, crossPlan = false) {
+  let result = await runProviderWork(agentId, text, cfg, { kind, phase, autoRoute, triageText, crossPlan });
   const agent = Agents.get(agentId);
   if (!agent || result?.ok || !agent.auto_failover || !isUsageLimitError(result)) return { result, kind };
 
@@ -480,7 +652,7 @@ async function runCollaboration(agentId, originalText, cfg, { requestText, triag
 
   note(agentId, `교차 협업 시작 · ${KIND_LABEL[implementer]} 구현 → ${KIND_LABEL[reviewer]} 리뷰 → ${KIND_LABEL[implementer]} 수정`);
   update(agentId, { collab_stage: 'implement' });
-  const implementation = await runWorkWithLimitFallback(agentId, originalText, cfg, implementer, 'implement', true, triageText);
+  const implementation = await runWorkWithLimitFallback(agentId, originalText, cfg, implementer, 'implement', true, triageText, true);
   if (!implementation.result?.ok) return finish(agentId, implementation.result, { title: '협업 구현 오류' });
 
   implementer = implementation.kind;
@@ -519,11 +691,27 @@ async function runPipeline(agentId, text, cfg, flow = { allowFailover: true }, e
   const workspace = Workspaces.get(agent.workspace_id);
   const efforts = stageEfforts(agent);
 
+  // 서버가 넣은 후속 지시(배경 작업 결과 확인 등)는 판단·계획 없이 실행 모델이 바로 이어받는다.
+  if (extra.direct) {
+    const autoExec = agent.kind === 'claude' && agent.pipeline === 'auto';
+    const r = await runTurn(agentId, text, cfg, autoExec ? { stage: 'exec', model: agent.exec_model, effort: efforts.exec } : { stage: 'manual', images: extra.images });
+    return completeOrFailover(agentId, r, text, cfg, flow.allowFailover !== false);
+  }
+
   if (agent.kind !== 'claude' || agent.pipeline !== 'auto') {
+    let prompt = text;
+    let planStartMessageId = null;
+    if (usesCrossPlan(agent) && flow.allowFailover !== false) { // 한도 전환으로 이어받은 지시는 계획이 이미 붙어 있다
+      const cp = await runCrossPlan(agentId, text, cfg, { ...extra, debate: true });
+      if (cp.deleted || cp.paused) return; // paused: 대표가 계획 이견을 고르면 executePlan이 이어간다
+      if (cp.failed) return finish(agentId, cp.failed);
+      prompt = cp.prompt;
+      planStartMessageId = cp.planStartMessageId;
+    }
     // Codex has no equivalent of Claude's --add-dir Read access, so photos ride along as -i flags
     // instead — only meaningful on this single-turn path, since Codex never enters the plan/exec split below.
-    const r = await runTurn(agentId, text, cfg, { stage: 'manual', images: extra.images });
-    return completeOrFailover(agentId, r, text, cfg, flow.allowFailover !== false);
+    const r = await runTurn(agentId, prompt, cfg, { stage: 'manual', images: extra.images });
+    return completeOrFailover(agentId, r, text, cfg, flow.allowFailover !== false, planStartMessageId);
   }
 
   note(agentId, `${agent.triage_model || 'haiku'}가 자동 판단 중…`);
@@ -718,7 +906,6 @@ function drainQueue(agentId, cfg, attempt = 0) {
 function finish(agentId, r, opts = {}) {
   flushUsage(agentId);
   setBlanketAllow(agentId, false);
-  clearProgress(agentId); // 로그 감시 중인 진행률은 남고, 에이전트가 직접 준 값만 지운다
   runWatch.delete(agentId);
   snapshotAfter(agentId);
   const agent = Agents.get(agentId);
@@ -765,14 +952,50 @@ export function enqueuePrompt(agentId, text, extra = {}) {
   const agent = Agents.get(agentId);
   if (!agent) throw new Error('agent not found');
   if (!text.trim() && !(extra.attachments || []).length && !(extra.links || []).length) throw new Error('내용이 없습니다');
-  const row = Queue.add(agentId, text, { attachments: extra.attachments || [], links: extra.links || [] });
+  const row = Queue.add(agentId, text, { attachments: extra.attachments || [], links: extra.links || [], ...(extra.direct ? { direct: true } : {}), ...(extra.display ? { display: extra.display } : {}) });
   const count = Queue.forAgent(agentId).length;
   note(agentId, `대기열 · ${count}번째로 받아 두었습니다 · 지금 작업이 끝나면 이어서 시작합니다`);
   emit('queue.changed', { agent_id: agentId, count });
   return { row, count };
 }
 export function queuedPrompts(agentId) {
-  return Queue.forAgent(agentId).map((q) => ({ id: q.id, text: q.text, created_at: q.created_at }));
+  return Queue.forAgent(agentId).map((q) => {
+    let extra = {};
+    try { extra = q.extra_json ? JSON.parse(q.extra_json) : {}; } catch {}
+    return { id: q.id, text: extra.display || q.text, created_at: q.created_at, auto: !!extra.direct };
+  });
+}
+
+/** 줄 세운 지시를 지금 돌고 있는 Claude 프로세스에 바로 넣는다(데스크톱의 "처리 중 끼워 넣기"와 같은 동작).
+ * 모델이 지금 단계를 마치는 대로 이 지시를 읽는다. Codex는 입력을 열어 둘 수 없어 줄에 남긴다. */
+export function steerQueued(agentId, qid) {
+  const agent = Agents.get(agentId);
+  if (!agent) throw new Error('agent not found');
+  const q = Queue.get(qid);
+  if (!q || q.agent_id !== agentId) throw new Error('대기열에 없는 지시입니다');
+  const entry = live.get(agentId);
+  if (!entry) {
+    // 이미 끝났으면 굳이 끼워 넣을 필요 없이 바로 시작한다.
+    drainQueue(agentId, lastCfg);
+    return Agents.get(agentId);
+  }
+  if (entry.provider !== 'codex' && typeof entry.child?.steer !== 'function') throw new Error('지금 단계에는 끼워 넣을 수 없습니다. 작업이 끝나면 이어서 시작합니다');
+  if (entry.provider === 'codex') throw new Error('Codex는 처리 중 끼워 넣기가 안 됩니다. 작업이 끝나면 이어서 시작합니다');
+  let extra = {};
+  try { extra = q.extra_json ? JSON.parse(q.extra_json) : {}; } catch {}
+  const attachments = extra.attachments || [];
+  const links = extra.links || [];
+  const text = `[대표가 처리 중에 끼워 넣은 지시]\n${q.text}${attachmentBlock(attachments, links)}`;
+  if (!entry.child.steer(text)) throw new Error('지금은 끼워 넣을 수 없습니다. 작업이 끝나면 이어서 시작합니다');
+  Queue.remove(qid);
+  emit('queue.changed', { agent_id: agentId, count: Queue.forAgent(agentId).length });
+  const meta = { steered: true };
+  if (attachments.length) meta.attachments = attachments;
+  if (links.length) meta.links = links;
+  const userMsg = Messages.add(agentId, 'user', q.text.trim() || describeAttachments(attachments, links), meta);
+  emit('message', { agent_id: agentId, message: userMsg });
+  note(agentId, '끼워 넣기 · 처리 중인 작업에 바로 전달했습니다. 지금 단계를 마치는 대로 반영됩니다');
+  return Agents.get(agentId);
 }
 export function removeQueued(agentId, id) {
   const q = Queue.get(id);
@@ -801,22 +1024,23 @@ export function startPrompt(agentId, text, cfg, extra = {}) {
   // regardless of provider or pipeline stage — the CLIs' own native skill loading only ever
   // applies to the plain execution turn, not the triage/plan stages this app adds around it.
   const command = resolveSkillCommand(text, listSkills(workspace.path));
-  const storedContent = text.trim() || describeAttachments(attachments, links);
+  const storedContent = extra.display || text.trim() || describeAttachments(attachments, links);
   const meta = {};
   if (attachments.length) meta.attachments = attachments;
   if (links.length) meta.links = links;
   if (command) meta.skill = { name: command.skill.name, scope: command.skill.scope, dir: command.skill.dir };
+  if (extra.direct) meta.auto = true; // 서버가 넣은 후속 지시(배경 작업 감시 등)
   const userMsg = Messages.add(agentId, 'user', storedContent, Object.keys(meta).length ? meta : null);
   emit('message', { agent_id: agentId, message: userMsg });
-  const updated = update(agentId, { status: 'working', last_error: null, pending_plan: 0, collab_stage: agent.collab_mode ? 'implement' : null });
+  const updated = update(agentId, { status: 'working', last_error: null, pending_plan: 0, plan_dispute: 0, collab_stage: agent.collab_mode ? 'implement' : null });
   const triageText = command ? triageTextFor(text, command.skill) : text;
   const requestText = command ? `${command.skill.name} 스킬 요청: ${command.args || text.trim()}` : text;
   const modelText = (command ? expandSkill(command.skill, command.args) : text) + attachmentBlock(attachments, links);
   const images = attachments.filter((a) => a.kind === 'image').map((a) => path.join(UPLOAD_DIR, a.view || a.file));
   const task = snapshotBefore(agentId, workspace).then(() => precompactIfNeeded(agentId, cfg)).then(() =>
-    agent.collab_mode
+    agent.collab_mode && !extra.direct
       ? runCollaboration(agentId, modelText, cfg, { requestText, triageText })
-      : runPipeline(agentId, modelText, cfg, { allowFailover: true }, { images, triageText, skill: command?.skill || null })
+      : runPipeline(agentId, modelText, cfg, { allowFailover: true }, { images, triageText, skill: command?.skill || null, direct: !!extra.direct })
   );
   task.catch((e) => {
     console.error('[pipeline]', e);
@@ -825,18 +1049,27 @@ export function startPrompt(agentId, text, cfg, extra = {}) {
   return updated;
 }
 
-export function executePlan(agentId, cfg) {
+/** side: 계획 이견일 때 대표의 선택. 'planner'는 최종안 그대로, 'reviewer'는 갈린 지점을 검토 의견대로. */
+export function executePlan(agentId, cfg, side = 'planner') {
   const agent = Agents.get(agentId);
   if (!agent) throw new Error('agent not found');
   if (live.has(agentId)) throw new Error('이미 작업 중입니다');
   if (!agent.pending_plan) throw new Error('실행 대기 중인 계획이 없습니다');
   usageAcc.delete(agentId);
-  const updated = update(agentId, { status: 'working', pending_plan: 0, collab_stage: null });
+  const dispute = !!agent.plan_dispute;
+  const updated = update(agentId, { status: 'working', pending_plan: 0, plan_dispute: 0, collab_stage: null });
   const efforts = stageEfforts(agent);
-  note(agentId, `계획 승인 → ${withEffort(agent.exec_model, efforts.exec)} 실행`);
-  const prompt = execPrompt(agentId, 0);
+  // 교차 모델(auto)만 계획·실행 모델이 따로 있다. 계획 분담(manual)은 에이전트의 단일 실행 모델이 맡는다.
+  const autoExec = agent.kind === 'claude' && agent.pipeline === 'auto';
+  const execLabel = autoExec ? withEffort(agent.exec_model, efforts.exec)
+    : agent.kind === 'codex' ? `Codex ${withEffort(agent.codex_model || codexDefaults().model, agent.codex_effort || codexDefaults().effort)}`
+    : `Claude ${withEffort(agent.model, agent.effort)}`;
+  const decision = dispute ? (side === 'reviewer' ? '검토 담당 안 선택' : '계획 담당 안 선택') : '계획 승인';
+  note(agentId, `${decision} → ${execLabel} 실행`);
+  const prompt = dispute && side === 'reviewer' ? execPromptReviewerSide(agentId) : execPrompt(agentId, 0);
+  const turnOpts = autoExec ? { stage: 'exec', model: agent.exec_model, effort: efforts.exec } : { stage: 'manual' };
   snapshotBefore(agentId, Workspaces.get(agent.workspace_id))
-    .then(() => runTurn(agentId, prompt, cfg, { stage: 'exec', model: agent.exec_model, effort: efforts.exec }))
+    .then(() => runTurn(agentId, prompt, cfg, turnOpts))
     .then((r) => completeOrFailover(agentId, r, prompt, cfg, true))
     .catch((e) => finish(agentId, { ok: false, text: e.message }));
   return updated;

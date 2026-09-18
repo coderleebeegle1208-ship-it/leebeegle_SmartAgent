@@ -16,7 +16,7 @@ import { requestApproval, waitForApproval, resolveApproval, setBlanketAllow, bla
 import { DAY_LABEL, describeDays, digestSettings, isValidTime, nextDue, normalizeDays, runSchedule, sendDigestPush, startScheduler } from './scheduler.js';
 import { buildDigest } from './digest.js';
 import { backupStatus, runBackup } from './backup.js';
-import { startPrompt, stopAgent, isRunning, runningIds, executePlan, switchProvider, compactAgent, enqueuePrompt, queuedPrompts, removeQueued } from './runners/index.js';
+import { startPrompt, stopAgent, isRunning, runningIds, executePlan, switchProvider, compactAgent, enqueuePrompt, queuedPrompts, removeQueued, steerQueued } from './runners/index.js';
 import { findClaudeBin } from './runners/claude.js';
 import { findCodexEntry } from './runners/codex.js';
 import { getUsage } from './usage.js';
@@ -25,7 +25,7 @@ import { CODEX_MODEL_CATALOG, MODEL_CATALOG, codexDefaults, isCodexModelAllowed,
 import { UPLOAD_DIR, findFfmpeg, loadUpload, saveUpload } from './uploads.js';
 import { copySkill, deleteSkill, listImportableSkills, listSkills, parseFrontmatter, validateSkillName, writeSkill } from './skills.js';
 import { heldNotifications, isQuietNow, quietSettings, saveQuietSettings } from './quiet.js';
-import { clearProgress, getProgress, setProgress } from './progress.js';
+import { jobFollowUpPrompt, jobsForAgent, restoreJobs, setJobFinishedHandler, startJob, watchLog } from './jobs.js';
 import { configureTelegram, initTelegram, muteTelegram, sendTelegram, telegramStatus, unlinkTelegram } from './telegram.js';
 
 const cfg = loadConfig();
@@ -94,7 +94,7 @@ function agentView(a) {
     blanket_allow: !!blanketAllow(a.id),
     schedules: Schedules.forAgent(a.id).length,
     queued: queuedPrompts(a.id).length,
-    progress: getProgress(a.id),
+    jobs: jobsForAgent(a.id),
   };
 }
 
@@ -218,7 +218,7 @@ api.get('/browse', (req, res) => {
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 api.post('/agents', (req, res) => {
-  const { workspace_id, kind, name, model, effort, codex_model, codex_effort, plan_effort, exec_effort, permission_mode, pipeline, triage_model, plan_model, exec_model, confirm_plan, collab_mode } = req.body || {};
+  const { workspace_id, kind, name, model, effort, codex_model, codex_effort, plan_effort, exec_effort, permission_mode, pipeline, triage_model, plan_model, exec_model, confirm_plan, collab_mode, cross_plan, codex_plan_model, codex_plan_effort, plan_debate } = req.body || {};
   const ws = Workspaces.get(Number(workspace_id));
   if (!ws) return res.status(400).json({ error: 'workspace not found' });
   const k = kind === 'codex' ? 'codex' : 'claude';
@@ -239,6 +239,10 @@ api.post('/agents', (req, res) => {
   if (isModelAllowed('exec', exec_model)) fields.exec_model = exec_model;
   if (confirm_plan !== undefined) fields.confirm_plan = confirm_plan ? 1 : 0;
   if (collab_mode !== undefined) fields.collab_mode = collab_mode ? 1 : 0;
+  if (plan_debate !== undefined) fields.plan_debate = plan_debate ? 1 : 0;
+  if (cross_plan !== undefined) fields.cross_plan = cross_plan ? 1 : 0;
+  if (isCodexModelAllowed(codex_plan_model)) fields.codex_plan_model = codex_plan_model;
+  if (EFFORTS.includes(codex_plan_effort)) fields.codex_plan_effort = codex_plan_effort;
   if (Object.keys(fields).length) agent = Agents.update(agent.id, fields);
   emit('agent.updated', { agent: agentView(agent) });
   res.json(agentView(agent));
@@ -278,6 +282,10 @@ api.patch('/agents/:id', (req, res) => {
   if ('confirm_plan' in (req.body || {})) fields.confirm_plan = req.body.confirm_plan ? 1 : 0;
   if ('auto_failover' in (req.body || {})) fields.auto_failover = req.body.auto_failover ? 1 : 0;
   if ('collab_mode' in (req.body || {})) fields.collab_mode = req.body.collab_mode ? 1 : 0;
+  if ('cross_plan' in (req.body || {})) fields.cross_plan = req.body.cross_plan ? 1 : 0;
+  if ('plan_debate' in (req.body || {})) fields.plan_debate = req.body.plan_debate ? 1 : 0;
+  if ('codex_plan_model' in (req.body || {})) fields.codex_plan_model = isCodexModelAllowed(req.body.codex_plan_model) ? req.body.codex_plan_model : null;
+  if ('codex_plan_effort' in (req.body || {})) fields.codex_plan_effort = EFFORTS.includes(req.body.codex_plan_effort) ? req.body.codex_plan_effort : null;
   if (req.body?.reset_session) {
     fields.session_id = null;
     AgentSessions.clear(id);
@@ -333,6 +341,14 @@ api.post('/agents/:id/prompt', (req, res) => {
   }
 });
 api.get('/agents/:id/queue', (req, res) => res.json(queuedPrompts(Number(req.params.id))));
+// 줄 세운 지시를 지금 처리 중인 작업에 바로 끼워 넣는다(Claude만). 안 되면 그대로 줄에 남는다.
+api.post('/agents/:id/queue/:qid/now', (req, res) => {
+  try {
+    res.json(agentView(steerQueued(Number(req.params.id), Number(req.params.qid))));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
 api.delete('/agents/:id/queue/:qid', (req, res) => {
   const ok = removeQueued(Number(req.params.id), Number(req.params.qid));
   if (!ok) return res.status(404).json({ error: 'not found' });
@@ -362,7 +378,7 @@ api.post('/agents/:id/compact', async (req, res) => {
 });
 api.post('/agents/:id/execute-plan', (req, res) => {
   try {
-    res.json(agentView(executePlan(Number(req.params.id), cfg)));
+    res.json(agentView(executePlan(Number(req.params.id), cfg, req.body?.side === 'reviewer' ? 'reviewer' : 'planner')));
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -645,11 +661,6 @@ api.post('/telegram/test', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-// ---------- 진행률 ----------
-api.delete('/agents/:id/progress', (req, res) => {
-  clearProgress(Number(req.params.id), { force: true });
-  res.json({ ok: true });
-});
 
 // Captured screenshots. <img> tags cannot send the bearer header, so the phone passes ?token=.
 api.get('/captures/:dir/:name', (req, res) => {
@@ -757,17 +768,70 @@ app.post('/internal/capture', requireInternal, async (req, res) => {
   }
 });
 
-app.post('/internal/progress', requireInternal, (req, res) => {
-  const { agentId, percent, label, log_file, done } = req.body || {};
+// 영상 파일 보내기(2026-09-17): 에이전트의 `send_file` MCP 도구. PC의 mp4/mov/webm/m4v(또는 사진)를
+// 폰 첨부 저장소(data/uploads/agent-N)로 복사하고, 채팅에 바로 재생되는 'video' 메시지를 올린다.
+// 완성 영상을 유튜브를 거치지 않고 폰에서 바로 확인하려는 용도. 썸네일은 saveUpload가 ffmpeg로 뽑는다.
+const SEND_FILE_MIME = { mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', m4v: 'video/x-m4v', jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp' };
+const SEND_FILE_MAX = 400 * 1024 * 1024;
+app.post('/internal/send_file', requireInternal, async (req, res) => {
+  const { agentId, file, caption } = req.body || {};
   const agent = Agents.get(Number(agentId));
   if (!agent) return res.status(400).json({ error: 'unknown agent' });
   const workspace = Workspaces.get(agent.workspace_id);
   try {
-    res.json({ ok: true, progress: setProgress(agent.id, { percent, label, log_file, done, workspacePath: workspace?.path }) });
+    const raw = String(file || '').trim();
+    if (!raw) throw new Error('file 인자가 비었습니다');
+    const abs = path.isAbsolute(raw) ? raw : path.resolve(workspace?.path || process.cwd(), raw);
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) throw new Error(`파일이 없습니다: ${abs}`);
+    const ext = path.extname(abs).slice(1).toLowerCase();
+    const mime = SEND_FILE_MIME[ext];
+    if (!mime) throw new Error(`보낼 수 없는 형식입니다(.${ext}). mp4·mov·webm·m4v·jpg·png·gif·webp만 됩니다`);
+    const size = fs.statSync(abs).size;
+    if (size > SEND_FILE_MAX) throw new Error(`파일이 너무 큽니다(${Math.round(size / 1048576)}MB, 최대 400MB)`);
+    const saved = await saveUpload({ agentId: agent.id, name: path.basename(abs), mime, buffer: fs.readFileSync(abs) });
+    const label = String(caption || '').trim() || path.basename(abs);
+    const m = Messages.add(agent.id, saved.kind === 'video' ? 'video' : 'image-file', label, {
+      file: saved.file, name: saved.name, size: saved.size, mime: saved.mime,
+      ...(saved.poster ? { poster: saved.poster } : {}), ...(saved.view ? { view: saved.view } : {}),
+      ...(saved.width ? { width: saved.width, height: saved.height } : {}), ...(saved.duration ? { duration: saved.duration } : {}),
+    });
+    emit('message', { agent_id: agent.id, message: m });
+    res.json({ ok: true, kind: saved.kind, size: saved.size, duration: saved.duration || null });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
 });
+
+// 배경 작업: run_job(서버가 띄움) / watch_job(로그만 감시). 끝나면 아래 handler가 에이전트에게 후속 지시를 넣는다.
+app.post('/internal/jobs', requireInternal, (req, res) => {
+  const { agentId, mode, command, label, cwd, shell, log_file, pid } = req.body || {};
+  const agent = Agents.get(Number(agentId));
+  if (!agent) return res.status(400).json({ error: 'unknown agent' });
+  const workspace = Workspaces.get(agent.workspace_id);
+  try {
+    const job = mode === 'watch'
+      ? watchLog(agent.id, { log_file, label, pid, workspacePath: workspace?.path })
+      : startJob(agent.id, { command, label, cwd, shell, workspacePath: workspace?.path });
+    res.json({ ok: true, job });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+setJobFinishedHandler((agentId, job, outcome, tail) => {
+  const agent = Agents.get(agentId);
+  if (!agent) return;
+  const prompt = jobFollowUpPrompt(job, outcome, tail);
+  const display = `배경 작업 확인 · ${job.label} · ${outcome === 'done' ? '끝남' : outcome === 'stalled' ? '멈춤' : '실패'} (시도 ${job.attempt})`;
+  const extra = { direct: true, display };
+  try {
+    // 담당자가 일하는 중이면 줄을 세운다. 계획 확인 대기 중이면 대표 결정이 먼저라 그 뒤에 이어간다.
+    if (isRunning(agentId) || agent.status === 'working' || agent.pending_plan) enqueuePrompt(agentId, prompt, extra);
+    else startPrompt(agentId, prompt, cfg, extra);
+  } catch (e) {
+    console.error('[jobs] follow-up', e.message);
+  }
+});
+restoreJobs();
 
 // ---------- internal: approval long-poll from the MCP approver ----------
 app.post('/internal/approval', requireInternal, async (req, res) => {
