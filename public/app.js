@@ -313,6 +313,12 @@
         if (state.route.name === 'agent' && state.detail?.agent.id === m.id) go({ name: 'home' });
         else render();
         break;
+      case 'run.live':
+        if (state.route.name === 'agent' && state.detail?.agent.id === m.agent_id) {
+          state.detail.live = m.live;
+          if (progressTick && !$('#progress')?.hidden) progressTick();
+        }
+        break;
       case 'message':
         if (state.route.name === 'agent' && state.detail?.agent.id === m.agent_id) {
           state.detail.messages.push(m.message);
@@ -1301,6 +1307,18 @@
     else { window.scrollTo(0, y); if (keepScroll) showNewBelow(); }
   }
   // "지금 뭘 하고 있나 · 얼마나 걸리고 있나" strip above the input while a run is live.
+  // 답변 중 상태 줄: PC 앱처럼 "39초 · 185 토큰 · 더 생각하는 중…". 문구는 단계(생각/쓰기/도구)에 따라 고르고
+  // 생각이 길어지면 몇 초마다 다음 문구로 넘어간다.
+  const THINK_PHRASES = ['생각하는 중', '더 생각하는 중', '곰곰이 따져보는 중', '정리하는 중', '생각이 거의 끝나갑니다'];
+  const TOOL_PHRASE = { Read: '파일 읽는 중', Write: '파일 만드는 중', Edit: '파일 고치는 중', NotebookEdit: '노트북 고치는 중', Bash: '명령 실행 중', PowerShell: '명령 실행 중', Grep: '코드 찾는 중', Glob: '파일 찾는 중', WebFetch: '웹 읽는 중', WebSearch: '웹 검색 중', Agent: '보조 에이전트 돌리는 중', mcp__approver__capture: '화면 찍는 중', mcp__approver__run_job: '배경 작업 맡기는 중' };
+  function livePhrase(live, startedAt) {
+    if (!live) return '준비하는 중';
+    if (live.phase === 'tool') return TOOL_PHRASE[live.tool] || (live.tool ? `${live.tool} 실행 중` : '도구 실행 중');
+    if (live.phase === 'writing') return '답을 쓰는 중';
+    const step = Math.floor((Date.now() - startedAt) / 7000);
+    return THINK_PHRASES[Math.min(step, THINK_PHRASES.length - 1)];
+  }
+  let progressTick = null;
   let progressTimer = null;
   function progressStage(a) {
     if (a.status === 'needs_attention') return '승인을 기다리는 중';
@@ -1330,14 +1348,20 @@
     const jobText = jobs.length ? `배경 작업 · ${jobs.map((j) => j.label + (j.attempt > 1 ? ` (재시도 ${j.attempt})` : '')).join(', ')} · 끝나면 자동 확인` : '';
     const tick = () => {
       if (running) {
-        $('#progress-time').textContent = fmtDur(Date.now() - startedAt);
-        $('#progress-text').textContent = jobText ? `${progressStage(a)} · ${jobText}` : progressStage(a);
+        const live = state.detail?.live || a.live || null;
+        const stage = progressStage(a);
+        const phrase = livePhrase(live, startedAt);
+        const head = phrase ? (stage === '작업 중' ? phrase : `${stage} · ${phrase}`) : stage;
+        const tokens = live && live.tokens ? ` · ↓ ${fmtTokens(live.tokens)} 토큰` : '';
+        $('#progress-time').textContent = '';
+        $('#progress-text').textContent = `${fmtDur(Date.now() - startedAt)}${tokens} · ${head}…${jobText ? ` · ${jobText}` : ''}`;
       } else {
         $('#progress-time').textContent = fmtDur(Date.now() - Math.min(...jobs.map((j) => j.started_at)));
         $('#progress-text').textContent = jobText;
       }
     };
     tick();
+    progressTick = tick;
     if (bar.hidden) { bar.hidden = false; syncComposerSpace(); }
     clearInterval(progressTimer);
     progressTimer = setInterval(tick, 1000);

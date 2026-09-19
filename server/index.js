@@ -16,7 +16,7 @@ import { requestApproval, waitForApproval, resolveApproval, setBlanketAllow, bla
 import { DAY_LABEL, describeDays, digestSettings, isValidTime, nextDue, normalizeDays, runSchedule, sendDigestPush, startScheduler } from './scheduler.js';
 import { buildDigest } from './digest.js';
 import { backupStatus, runBackup } from './backup.js';
-import { startPrompt, stopAgent, isRunning, runningIds, executePlan, switchProvider, compactAgent, enqueuePrompt, queuedPrompts, removeQueued, steerQueued, syncDesktopTranscript } from './runners/index.js';
+import { startPrompt, stopAgent, isRunning, runningIds, executePlan, switchProvider, compactAgent, enqueuePrompt, queuedPrompts, removeQueued, steerQueued, syncDesktopTranscript, liveStatsOf } from './runners/index.js';
 import { desktopRoot, listDesktopSessions, readTranscript, transcriptPath } from './desktop-sessions.js';
 import { answerStyle, setAnswerStyle } from './style.js';
 import { findClaudeBin } from './runners/claude.js';
@@ -100,6 +100,7 @@ function agentView(a) {
     schedules: Schedules.forAgent(a.id).length,
     queued: queuedPrompts(a.id).length,
     jobs: jobsForAgent(a.id),
+    live: liveStatsOf(a.id),
   };
 }
 

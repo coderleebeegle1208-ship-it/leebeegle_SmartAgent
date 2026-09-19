@@ -199,6 +199,23 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
     try { child.stdin.write(userLine(claudeStdinText(t, opts))); return true; } catch { pendingInputs -= 1; return false; }
   };
 
+  // 답변 중 상태 줄(PC 앱의 "39s · 185 토큰 · 더 생각하는 중…")용: 부분 스트림 이벤트로 지금 단계와
+  // 이번 턴의 출력 토큰을 센다. 전체 assistant 메시지는 그대로 따로 오므로 화면 내용에는 영향이 없다.
+  // 정확한 출력 토큰은 메시지가 끝날 때(message_delta)만 오므로, 그 사이에는 스트림 글자 수로 어림해
+  // 숫자가 올라가게 하고 정확한 값이 오면 그 값으로 맞춘다.
+  let liveDone = 0, liveCur = 0, liveEst = 0, livePhase = 'thinking', liveTool = null;
+  function handleStreamEvent(ev) {
+    const e = ev.event || {};
+    if (e.type === 'message_start') { liveDone += Math.max(liveCur, liveEst); liveCur = 0; liveEst = 0; }
+    else if (e.type === 'message_delta' && e.usage) { liveCur = Math.max(liveCur, e.usage.output_tokens || 0); liveEst = 0; }
+    else if (e.type === 'content_block_delta') { const d = e.delta || {}; const t = d.text || d.thinking || d.partial_json || ''; liveEst += Math.ceil(t.length / 3); }
+    else if (e.type === 'content_block_start' && !ev.parent_tool_use_id) {
+      const b = e.content_block || {};
+      livePhase = b.type === 'thinking' ? 'thinking' : b.type === 'tool_use' ? 'tool' : 'writing';
+      liveTool = b.type === 'tool_use' ? b.name || null : null;
+    } else if (e.type !== 'content_block_delta') return;
+    hooks.onLive?.({ tokens: liveDone + Math.max(liveCur, liveEst), phase: livePhase, tool: liveTool });
+  }
   let gotResult = false;
   let lastContext = 0;
   let stderrTail = '';
@@ -223,6 +240,7 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
   });
 
   function handleEvent(ev) {
+    if (ev.type === 'stream_event') return handleStreamEvent(ev);
     if (ev.type === 'system') {
       if (ev.subtype === 'init') {
         hooks.onSession?.(ev.session_id, { model: ev.model });
@@ -315,7 +333,7 @@ export function buildClaudeArgs(agent, mcpPath, opts = {}) {
   // --strict-mcp-config keeps every turn from also loading the user's global ~/.claude.json MCP
   // servers (unauthorized ones still ship their tool definitions in the prefix); the approver
   // server above still loads because it's passed via --mcp-config.
-  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--permission-prompt-tool', 'mcp__approver__approve', '--mcp-config', mcpPath, '--strict-mcp-config', '--allowedTools', 'mcp__approver__capture', 'mcp__approver__watch_job', 'mcp__approver__restart_server', 'WebFetch'];
+  const args = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--permission-prompt-tool', 'mcp__approver__approve', '--mcp-config', mcpPath, '--strict-mcp-config', '--allowedTools', 'mcp__approver__capture', 'mcp__approver__watch_job', 'mcp__approver__restart_server', 'WebFetch'];
   // 입력을 stream-json으로 받으면 stdin을 열어 둘 수 있어, 처리 중에도 대표의 지시를 끼워 넣을 수 있다(steer).
   args.push('--input-format', 'stream-json');
   const isPlanOrReview = opts.stage === 'plan' || opts.phase === 'review';

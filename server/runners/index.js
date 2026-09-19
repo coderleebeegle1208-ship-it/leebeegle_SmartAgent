@@ -28,6 +28,13 @@ const usageAcc = new Map(); // agentId -> stage usage rows for the run in progre
 const turnSnap = new Map(); // agentId -> turn_snapshots row taken before the run in progress
 const runWatch = new Map(); // agentId -> cost/loop watch for the run in progress (spans plan + exec)
 const retried = new Set(); // agentIds whose current run already got its one automatic retry
+const liveStats = new Map(); // agentId -> { base, cur, phase, tool, sentAt } 답변 중 상태 줄(토큰·단계)
+const LIVE_EMIT_MS = 400;
+/** 지금 돌고 있는 턴의 상태(폰 상태 줄용). 없으면 null. */
+export function liveStatsOf(agentId) {
+  const s = liveStats.get(agentId);
+  return s ? { tokens: s.base + s.cur, phase: s.phase, tool: s.tool } : null;
+}
 const RETRY_DELAY_MS = 20_000;
 // 폰으로 바로 받아볼 만한 결과물. 코드·설정 파일은 제외.
 const DELIVERABLE_RE = /\.(mp4|mov|webm|mp3|wav|m4a|pdf|png|jpe?g|gif|webp|svg|html?|docx?|xlsx?|pptx?|csv|zip|srt|md|txt)$/i;
@@ -297,6 +304,17 @@ function runTurnOnce(agentId, text, cfg, opts = {}) {
         const m = Messages.add(agentId, role, content, { ...(meta || {}), provider, ...(opts.phase ? { phase: opts.phase } : {}) });
         emit('message', { agent_id: agentId, message: m });
       },
+      onLive: (p) => {
+        if (opts.phase === 'review') return;
+        const s = liveStats.get(agentId) || { base: 0, cur: 0, phase: 'thinking', tool: null, sentAt: 0 };
+        const changed = s.phase !== p.phase || s.tool !== p.tool;
+        s.cur = p.tokens; s.phase = p.phase; s.tool = p.tool;
+        liveStats.set(agentId, s);
+        const now = Date.now();
+        if (!changed && now - s.sentAt < LIVE_EMIT_MS) return;
+        s.sentAt = now;
+        emit('run.live', { agent_id: agentId, live: { tokens: s.base + s.cur, phase: s.phase, tool: s.tool } });
+      },
       onProgress: (p) => {
         if (!Agents.get(agentId) || opts.phase === 'review') return;
         const limits = watchLimits(cfg);
@@ -317,6 +335,9 @@ function runTurnOnce(agentId, text, cfg, opts = {}) {
         stopAgent(agentId);
       },
       onResult: (r) => {
+        // 단계(계획→실행)가 바뀌어도 이번 턴의 토큰은 이어서 센다.
+        const ls = liveStats.get(agentId);
+        if (ls) { ls.base += ls.cur; ls.cur = 0; }
         result = { ...r, provider, ...(opts.phase ? { phase: opts.phase } : {}), ...(geminiAccount ? { accountId: geminiAccount.id } : {}) };
         const usage = provider === 'codex' ? (r.usage ? normalizeCodexUsage(r.usage) : null)
           : provider === 'gemini' ? (r.usage ? normalizeGeminiUsage(r.usage) : null)
@@ -1037,6 +1058,7 @@ function drainQueue(agentId, cfg, attempt = 0) {
 }
 
 function finish(agentId, r, opts = {}) {
+  liveStats.delete(agentId);
   flushUsage(agentId);
   setBlanketAllow(agentId, false);
   runWatch.delete(agentId);
@@ -1155,6 +1177,7 @@ export function startPrompt(agentId, text, cfg, extra = {}) {
 
   // PC 클로드 앱에서 그사이 오간 대화가 있으면 먼저 화면에 옮겨 순서를 맞춘다.
   syncDesktopTranscript(agentId);
+  liveStats.delete(agentId);
   usageAcc.delete(agentId);
   // `/이름 인자` at the start of the message swaps in that skill's SKILL.md as the model text,
   // regardless of provider or pipeline stage — the CLIs' own native skill loading only ever
