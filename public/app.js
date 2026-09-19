@@ -592,6 +592,9 @@
   async function refreshState(silent) {
     try {
       state.data = await api('/state');
+      // 서버 파일이 바뀌었으면(업데이트·재시작) 열어 둔 화면을 새로 고친다. 입력 중이면 다음 기회에.
+      if (state.build && state.data.build && state.build !== state.data.build && !($('#prompt')?.value || '').trim()) { location.reload(); return; }
+      state.build = state.data.build || state.build;
       if (state.route.name === 'home') render();
       if (!silent) toast('새로고침');
     } catch (e) {

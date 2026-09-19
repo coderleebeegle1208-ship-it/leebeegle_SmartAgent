@@ -34,6 +34,8 @@ import { cancelJobs, jobFollowUpPrompt, jobsForAgent, restoreJobs, setJobFinishe
 import { configureTelegram, initTelegram, muteTelegram, sendTelegram, telegramStatus, unlinkTelegram } from './telegram.js';
 
 const cfg = loadConfig();
+// 폰이 열어 둔 화면이 오래된 app.js/style.css로 계속 돌지 않도록: 파일이 바뀌면 값이 달라지고, 폰은 이 값이 바뀐 걸 보면 스스로 새로 고친다.
+const BUILD_ID = ['app.js', 'style.css', 'index.html'].map((f) => { try { return Math.round(fs.statSync(path.join(PUBLIC_DIR, f)).mtimeMs); } catch { return 0; } }).join('-');
 initPush(cfg);
 configureUnattended(cfg);
 startScheduler(cfg);
@@ -161,6 +163,7 @@ api.get('/state', (req, res) => {
     codex: { models: CODEX_MODEL_CATALOG, ...codexDefaults() },
     gemini: { models: geminiModelCatalog(), efforts: GEMINI_EFFORTS, ...geminiDefaults(), accounts: geminiAccounts() },
     settings: { answer_style: answerStyle() },
+    build: BUILD_ID,
     workspaces,
     agents,
     counts,
