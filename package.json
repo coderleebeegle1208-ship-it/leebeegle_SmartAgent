@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node --no-warnings=ExperimentalWarning server/index.js",
     "dev": "node --no-warnings=ExperimentalWarning --watch server/index.js",
-    "test": "node --test test/core.test.js"
+    "test": "node --test test/core.test.js test/gemini.test.js test/desktop.test.js"
   },
   "engines": {
     "node": ">=22.13"

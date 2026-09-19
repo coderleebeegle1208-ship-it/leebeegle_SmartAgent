@@ -1,4 +1,4 @@
-// Agent Remote — phone-first dashboard for Claude Code / Codex running on this PC.
+// Agent Remote — phone-first dashboard for Claude Code / Codex / Gemini running on this PC.
 import http from 'node:http';
 import os from 'node:os';
 import fs from 'node:fs';
@@ -16,16 +16,20 @@ import { requestApproval, waitForApproval, resolveApproval, setBlanketAllow, bla
 import { DAY_LABEL, describeDays, digestSettings, isValidTime, nextDue, normalizeDays, runSchedule, sendDigestPush, startScheduler } from './scheduler.js';
 import { buildDigest } from './digest.js';
 import { backupStatus, runBackup } from './backup.js';
-import { startPrompt, stopAgent, isRunning, runningIds, executePlan, switchProvider, compactAgent, enqueuePrompt, queuedPrompts, removeQueued, steerQueued } from './runners/index.js';
+import { startPrompt, stopAgent, isRunning, runningIds, executePlan, switchProvider, compactAgent, enqueuePrompt, queuedPrompts, removeQueued, steerQueued, syncDesktopTranscript } from './runners/index.js';
+import { desktopRoot, listDesktopSessions, readTranscript, transcriptPath } from './desktop-sessions.js';
 import { findClaudeBin } from './runners/claude.js';
 import { findCodexEntry } from './runners/codex.js';
+import { findGeminiEntry } from './runners/gemini.js';
+import { allQuotas as geminiQuotas, finishLogin as geminiFinishLogin, getAccount as geminiAccount, listAccounts as geminiAccounts, probeLogin as geminiProbeLogin, removeAccount as geminiRemoveAccount, startLogin as geminiStartLogin } from './gemini-accounts.js';
 import { getUsage } from './usage.js';
 import { CAPTURE_DIR, captureScreenshot, findBrowserBin } from './capture.js';
-import { CODEX_MODEL_CATALOG, MODEL_CATALOG, codexDefaults, isCodexModelAllowed, isModelAllowed } from './models.js';
+import { CODEX_MODEL_CATALOG, GEMINI_EFFORTS, MODEL_CATALOG, codexDefaults, geminiDefaults, geminiModelCatalog, isCodexModelAllowed, isGeminiModelAllowed, isModelAllowed } from './models.js';
+import { refreshGeminiModels } from './gemini-models.js';
 import { UPLOAD_DIR, findFfmpeg, loadUpload, saveUpload } from './uploads.js';
 import { copySkill, deleteSkill, listImportableSkills, listSkills, parseFrontmatter, validateSkillName, writeSkill } from './skills.js';
 import { heldNotifications, isQuietNow, quietSettings, saveQuietSettings } from './quiet.js';
-import { jobFollowUpPrompt, jobsForAgent, restoreJobs, setJobFinishedHandler, startJob, watchLog } from './jobs.js';
+import { cancelJobs, jobFollowUpPrompt, jobsForAgent, restoreJobs, setJobFinishedHandler, startJob, watchLog } from './jobs.js';
 import { configureTelegram, initTelegram, muteTelegram, sendTelegram, telegramStatus, unlinkTelegram } from './telegram.js';
 
 const cfg = loadConfig();
@@ -89,7 +93,7 @@ function agentView(a) {
     ...a,
     running: isRunning(a.id),
     pending_approvals: Approvals.pendingForAgent(a.id).length,
-    provider_sessions: { claude: !!saved.claude, codex: !!saved.codex },
+    provider_sessions: { claude: !!saved.claude, codex: !!saved.codex, gemini: !!saved.gemini },
     compact_limit: cfg.compactAfterTokens || 0,
     blanket_allow: !!blanketAllow(a.id),
     schedules: Schedules.forAgent(a.id).length,
@@ -144,14 +148,16 @@ api.post('/workspaces/:id/remote', async (req, res) => {
 
 api.get('/state', (req, res) => {
   const workspaces = Workspaces.all().map((w) => ({ ...w, repo: cachedRemote(w.path) }));
+  refreshGeminiModels(); // Antigravity CLI(agy)가 업데이트되면 새 모델이 목록에 바로 나타난다
   const agents = Agents.all().map(agentView);
   const counts = { all: agents.length, needs_attention: 0, working: 0, done: 0, error: 0, idle: 0 };
   for (const a of agents) counts[a.status] = (counts[a.status] || 0) + 1;
   res.json({
     computer: { name: os.hostname(), platform: process.platform, ...stats, connected: true },
-    tools: { claude: findClaudeBin(), codex: !!findCodexEntry(), capture: !!findBrowserBin(), ffmpeg: !!findFfmpeg() },
+    tools: { claude: findClaudeBin(), codex: !!findCodexEntry(), gemini: !!findGeminiEntry(), capture: !!findBrowserBin(), ffmpeg: !!findFfmpeg() },
     models: MODEL_CATALOG,
     codex: { models: CODEX_MODEL_CATALOG, ...codexDefaults() },
+    gemini: { models: geminiModelCatalog(), efforts: GEMINI_EFFORTS, ...geminiDefaults(), accounts: geminiAccounts() },
     workspaces,
     agents,
     counts,
@@ -159,8 +165,44 @@ api.get('/state', (req, res) => {
 });
 
 api.get('/usage', async (req, res) => {
-  const provider = req.query.provider === 'codex' ? 'codex' : 'claude';
+  const provider = ['codex', 'gemini'].includes(req.query.provider) ? req.query.provider : 'claude';
   res.json(await getUsage(provider, req.query.refresh === '1'));
+});
+
+// ---------- Gemini: Google 계정 연결 (Antigravity CLI 로그인, 한 번에 하나) ----------
+api.get('/gemini/accounts', async (req, res) => {
+  // 아직 계정을 모르면(첫 실행·PC에서 직접 로그인한 뒤) agy에게 물어본다.
+  if (!geminiAccounts().length || req.query.refresh === '1') {
+    const before = geminiAccounts().length;
+    await geminiProbeLogin();
+    if (geminiAccounts().length !== before) emit('gemini.accounts', { accounts: geminiAccounts() });
+  }
+  res.json({ accounts: await geminiQuotas(req.query.refresh === '1') });
+});
+api.post('/gemini/login/start', async (req, res) => {
+  try {
+    res.json(await geminiStartLogin());
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+api.post('/gemini/login/finish', async (req, res) => {
+  try {
+    const account = await geminiFinishLogin(String(req.body?.loginId || ''), String(req.body?.code || ''));
+    emit('gemini.accounts', { accounts: geminiAccounts() });
+    res.json({ account });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+api.delete('/gemini/accounts/:id', async (req, res) => {
+  const id = String(req.params.id);
+  if (!geminiAccount(id)) return res.status(404).json({ error: 'not found' });
+  // 이 계정에 고정돼 있던 담당자는 자동 선택으로 돌린다.
+  for (const a of Agents.all()) if (a.gemini_account === id) Agents.update(a.id, { gemini_account: null });
+  await geminiRemoveAccount(id);
+  emit('gemini.accounts', { accounts: geminiAccounts() });
+  res.json({ ok: true });
 });
 
 api.post('/workspaces', (req, res) => {
@@ -186,7 +228,7 @@ api.patch('/workspaces/:id', (req, res) => {
 });
 api.delete('/workspaces/:id', (req, res) => {
   const id = Number(req.params.id);
-  for (const a of Agents.byWorkspace(id)) stopAgent(a.id);
+  for (const a of Agents.byWorkspace(id)) { stopAgent(a.id); cancelJobs(a.id); }
   Workspaces.remove(id);
   emit('workspace.deleted', { id });
   res.json({ ok: true });
@@ -218,15 +260,20 @@ api.get('/browse', (req, res) => {
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 api.post('/agents', (req, res) => {
-  const { workspace_id, kind, name, model, effort, codex_model, codex_effort, plan_effort, exec_effort, permission_mode, pipeline, triage_model, plan_model, exec_model, confirm_plan, collab_mode, cross_plan, codex_plan_model, codex_plan_effort, plan_debate } = req.body || {};
+  const { workspace_id, kind, name, model, effort, codex_model, codex_effort, gemini_model, gemini_effort, gemini_account, plan_effort, exec_effort, permission_mode, pipeline, triage_model, plan_model, exec_model, confirm_plan, collab_mode, cross_plan, codex_plan_model, codex_plan_effort, plan_debate } = req.body || {};
   const ws = Workspaces.get(Number(workspace_id));
   if (!ws) return res.status(400).json({ error: 'workspace not found' });
-  const k = kind === 'codex' ? 'codex' : 'claude';
-  let agent = Agents.create(ws.id, k, name?.trim() || (k === 'codex' ? 'Codex' : 'Claude'));
+  const k = ['codex', 'gemini'].includes(kind) ? kind : 'claude';
+  const KIND_NAME = { claude: 'Claude', codex: 'Codex', gemini: 'Gemini' };
+  let agent = Agents.create(ws.id, k, name?.trim() || KIND_NAME[k]);
   const fields = {};
   if (k === 'codex') {
     if (isCodexModelAllowed(codex_model || model)) fields.codex_model = codex_model || model;
     if (EFFORTS.includes(codex_effort || effort)) fields.codex_effort = codex_effort || effort;
+  } else if (k === 'gemini') {
+    if (isGeminiModelAllowed(gemini_model || model)) fields.gemini_model = gemini_model || model;
+    if (GEMINI_EFFORTS.includes(gemini_effort || effort)) fields.gemini_effort = gemini_effort || effort;
+    if (gemini_account && geminiAccount(String(gemini_account))) fields.gemini_account = String(gemini_account);
   } else if (isModelAllowed('manual', model)) fields.model = model;
   // A single "강도" chosen at creation applies to every stage until it is tuned per stage in the composer.
   if (k === 'claude' && EFFORTS.includes(effort)) { fields.effort = effort; fields.plan_effort = effort; fields.exec_effort = effort; }
@@ -247,9 +294,60 @@ api.post('/agents', (req, res) => {
   emit('agent.updated', { agent: agentView(agent) });
   res.json(agentView(agent));
 });
+// ---------- PC 클로드 앱(코드 탭) 대화 이어받기 ----------
+// 같은 세션 id를 그대로 --resume 하므로 폰과 PC가 한 기록 파일을 번갈아 이어 쓴다.
+const DESKTOP_HISTORY_LIMIT = 300;
+function desktopSessionRows() {
+  const linked = new Map();
+  for (const a of Agents.all()) {
+    if (a.desktop_host_id) linked.set(a.desktop_host_id, a.id);
+    if (a.session_id) linked.set(`s:${a.session_id}`, a.id);
+  }
+  return listDesktopSessions().map((s) => ({ ...s, agent_id: linked.get(s.host_id) || linked.get(`s:${s.session_id}`) || null }));
+}
+api.get('/desktop-sessions', (req, res) => res.json(desktopSessionRows()));
+api.post('/desktop-sessions/import', (req, res) => {
+  const ids = Array.isArray(req.body?.host_ids) ? req.body.host_ids.map(String) : [];
+  if (!ids.length) return res.status(400).json({ error: '가져올 대화를 고르세요' });
+  const rows = desktopSessionRows();
+  const created = [];
+  const skipped = [];
+  for (const id of ids) {
+    const s = rows.find((r) => r.host_id === id);
+    if (!s) { skipped.push({ host_id: id, reason: '목록에 없음' }); continue; }
+    if (s.agent_id) { skipped.push({ host_id: id, title: s.title, reason: '이미 가져옴' }); continue; }
+    if (!s.resumable) { skipped.push({ host_id: id, title: s.title, reason: s.reason }); continue; }
+    const abs = path.resolve(s.cwd);
+    let ws = Workspaces.all().find((w) => path.resolve(w.path).toLowerCase() === abs.toLowerCase());
+    if (!ws) { ws = Workspaces.create(path.basename(abs), abs); emit('workspace.created', { workspace: ws }); }
+    let agent = Agents.create(ws.id, 'claude', s.title);
+    // PC에서 쓰던 모델·강도·권한을 그대로. 자동 파이프라인(분류→계획→실행)은 이어받는 대화에는 맞지 않아 수동으로 둔다.
+    const family = String(s.model || '').match(/^claude-(fable|opus|sonnet|haiku)/)?.[1] || null;
+    const fields = {
+      session_id: s.session_id,
+      desktop_host_id: s.host_id,
+      pipeline: 'manual',
+      permission_mode: ['acceptEdits', 'auto'].includes(s.permission_mode) ? s.permission_mode : 'ask',
+      model: isModelAllowed('manual', s.model) ? s.model : family && isModelAllowed('manual', family) ? family : null,
+    };
+    if (EFFORTS.includes(s.effort)) { fields.effort = s.effort; fields.plan_effort = s.effort; fields.exec_effort = s.effort; }
+    const { messages, pos } = readTranscript(transcriptPath(abs, s.session_id), 0);
+    for (const m of messages.slice(-DESKTOP_HISTORY_LIMIT)) Messages.add(agent.id, m.role, m.content, { desktop: true }, m.ts);
+    fields.transcript_pos = pos;
+    const lastAnswer = [...messages].reverse().find((m) => m.role === 'assistant');
+    if (lastAnswer) fields.last_response = lastAnswer.content;
+    agent = Agents.update(agent.id, fields);
+    AgentSessions.upsert(agent.id, 'claude', s.session_id);
+    emit('agent.updated', { agent: agentView(agent) });
+    created.push(agentView(agent));
+  }
+  res.json({ created, skipped });
+});
 api.get('/agents/:id', (req, res) => {
-  const a = Agents.get(Number(req.params.id));
+  let a = Agents.get(Number(req.params.id));
   if (!a) return res.status(404).json({ error: 'not found' });
+  // PC 클로드 앱에서 그사이 오간 대화를 먼저 옮겨 두고 보여 준다.
+  if (a.desktop_host_id && !isRunning(a.id)) { try { if (syncDesktopTranscript(a.id)) a = Agents.get(a.id); } catch {} }
   res.json({
     agent: agentView(a),
     workspace: Workspaces.get(a.workspace_id),
@@ -273,6 +371,9 @@ api.patch('/agents/:id', (req, res) => {
   if ('codex_model' in (req.body || {})) fields.codex_model = isCodexModelAllowed(req.body.codex_model) ? req.body.codex_model : null;
   if ('effort' in (req.body || {})) fields.effort = EFFORTS.includes(req.body.effort) ? req.body.effort : null;
   if ('codex_effort' in (req.body || {})) fields.codex_effort = EFFORTS.includes(req.body.codex_effort) ? req.body.codex_effort : null;
+  if ('gemini_model' in (req.body || {})) fields.gemini_model = isGeminiModelAllowed(req.body.gemini_model) ? req.body.gemini_model : null;
+  if ('gemini_effort' in (req.body || {})) fields.gemini_effort = GEMINI_EFFORTS.includes(req.body.gemini_effort) ? req.body.gemini_effort : null;
+  if ('gemini_account' in (req.body || {})) fields.gemini_account = req.body.gemini_account && geminiAccount(String(req.body.gemini_account)) ? String(req.body.gemini_account) : null;
   if ('plan_effort' in (req.body || {})) fields.plan_effort = EFFORTS.includes(req.body.plan_effort) ? req.body.plan_effort : null;
   if ('exec_effort' in (req.body || {})) fields.exec_effort = EFFORTS.includes(req.body.exec_effort) ? req.body.exec_effort : null;
   if (['auto', 'manual'].includes(req.body?.pipeline)) fields.pipeline = req.body.pipeline;
@@ -288,16 +389,22 @@ api.patch('/agents/:id', (req, res) => {
   if ('codex_plan_effort' in (req.body || {})) fields.codex_plan_effort = EFFORTS.includes(req.body.codex_plan_effort) ? req.body.codex_plan_effort : null;
   if (req.body?.reset_session) {
     fields.session_id = null;
+    fields.desktop_host_id = null; // 새 대화로 시작하면 PC 클로드 앱과 같은 기록을 더는 쓰지 않는다
+    fields.transcript_pos = 0;
     AgentSessions.clear(id);
   }
   // Changing the running model mid-conversation means the next turn re-writes the whole
   // conversation into that model's own cache — a one-time cost worth flagging, not hiding by
   // clearing the session (that would also throw away the conversation memory).
-  const modelFields = ['model', 'codex_model', 'exec_model'];
+  const modelFields = ['model', 'codex_model', 'gemini_model', 'exec_model'];
   const modelChanged = current.session_id && modelFields.some((f) => f in fields && fields[f] !== current[f]);
   const a = Agents.update(id, fields);
   if (req.body?.clear_messages) Messages.clear(id);
-  if (modelChanged) {
+  if (modelChanged && current.desktop_host_id) {
+    // PC 클로드 앱과 같은 기록을 쓰는 대화는 요약으로 세션을 갈아타면 연동이 끊긴다. PC 앱이 그러듯 같은 대화에서 모델만 바꾼다.
+    const m = Messages.add(id, 'system', '실행 모델이 바뀌었습니다. PC 클로드 앱과 같은 대화라 요약하지 않고 그대로 이어갑니다(다음 지시 한 번은 대화를 새 모델에 다시 기억시켜 비용이 더 듭니다).');
+    emit('message', { agent_id: id, message: m });
+  } else if (modelChanged) {
     // Summarize into a memo instead of resuming: the alternative is re-writing the whole
     // conversation into the new model's cache on the next turn, which costs far more.
     compactAgent(id, cfg, { reason: 'model-change' }).catch(() => {
@@ -311,6 +418,7 @@ api.patch('/agents/:id', (req, res) => {
 api.delete('/agents/:id', (req, res) => {
   const id = Number(req.params.id);
   stopAgent(id);
+  cancelJobs(id);
   Agents.remove(id);
   emit('agent.deleted', { id });
   res.json({ ok: true });
@@ -393,7 +501,8 @@ api.post('/agents/:id/switch-provider', (req, res) => {
 api.post('/agents/:id/stop', (req, res) => {
   const id = Number(req.params.id);
   const stopped = stopAgent(id);
-  res.json({ ok: stopped });
+  const jobs = cancelJobs(id); // 배경 작업도 같이 끊는다 — 안 그러면 '작업 중' 표시가 남고, 끝나면 재시도까지 한다
+  res.json({ ok: stopped || jobs > 0, jobs });
 });
 
 // ---------- skills (/이름 slash commands) ----------
@@ -883,10 +992,18 @@ bus.on('event', (ev) => {
 setInterval(() => {
   for (const c of wss.clients) if (c.readyState === 1) c.ping();
 }, 30_000).unref();
+// PC 클로드 앱과 대화를 같이 쓰는 담당자는 PC 쪽에서 새로 오간 말을 주기적으로 폰 화면에 옮긴다(파일 크기만 보므로 가볍다).
+setInterval(() => {
+  for (const a of Agents.all()) if (a.desktop_host_id && !isRunning(a.id)) { try { syncDesktopTranscript(a.id); } catch {} }
+}, 15_000).unref();
 
 server.listen(cfg.port, '0.0.0.0', () => {
   console.log(`leebeegle_SmartAgent listening on http://localhost:${cfg.port}`);
   console.log(process.stdout.isTTY ? `Access token: ${cfg.token}` : 'Access token: stored in data/config.json');
   console.log(`Claude binary: ${findClaudeBin()}`);
+  try { console.log(`Desktop Claude app: ${listDesktopSessions().length} chats (${desktopRoot()}) · APPDATA=${process.env.APPDATA || "(unset)"}`); } catch (e) { console.log(`Desktop Claude app: unreadable · ${e.message}`); }
   console.log(`Codex CLI: ${findCodexEntry() ? 'found' : 'not installed'}`);
+  console.log(`Antigravity CLI (Gemini): ${findGeminiEntry() ? `found · models ${refreshGeminiModels().join(', ')}` : 'not installed'}`);
+  // 켜질 때 agy 로그인 상태를 한 번 확인해 둔다(PC에서 직접 로그인했어도 앱이 알아채도록).
+  if (findGeminiEntry()) geminiProbeLogin().then((p) => { console.log(`Antigravity login: ${p.loggedIn ? p.email : 'none'}`); if (p.loggedIn) emit('gemini.accounts', { accounts: geminiAccounts() }); }).catch(() => {});
 });

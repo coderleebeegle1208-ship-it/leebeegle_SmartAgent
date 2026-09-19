@@ -24,7 +24,8 @@
   const fmtTokens = (n) => (n < 1000 ? String(n) : n < 1_000_000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k` : `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`);
   const fmtUsd = (n) => (n == null ? null : n < 0.01 ? '<$0.01' : `$${n.toFixed(2)}`);
   const statusLabel = { idle: '대기', working: '작업 중', needs_attention: '승인 필요', done: '완료', error: '오류' };
-  const kindLabel = { claude: 'CLAUDE', codex: 'CODEX' };
+  const kindLabel = { claude: 'CLAUDE', codex: 'CODEX', gemini: 'GEMINI' };
+  const kindMark = { claude: 'CL', codex: 'CX', gemini: 'GM' };
   const collabStageLabel = { implement: '구현 중', review: '교차 리뷰 중', revise: '최종 수정 중' };
   const phaseLabel = { implement: '구현', review: '리뷰', revise: '수정' };
   // Model names come from the server catalog (server/models.js): each family offers "최신" (an alias
@@ -60,6 +61,22 @@
   const codexModelOptions = (current) => codexCatalog()
     .map((o) => `<option value="${o.value}" ${o.value === current ? 'selected' : ''}>${esc(o.label)}</option>`)
     .join('');
+  // Gemini: 모델 목록 + 연결된 Google 계정 목록(구독 여러 개를 나란히 쓴다).
+  const geminiCatalog = () => state.data?.gemini?.models || [];
+  const geminiDefaultModel = () => state.data?.gemini?.model || 'auto';
+  const geminiAccounts = () => state.data?.gemini?.accounts || [];
+  const geminiModelLabel = (value) => geminiCatalog().find((o) => o.value === value)?.label || String(value || '기본 모델');
+  const geminiModelOptions = (current) => geminiCatalog()
+    .map((o) => `<option value="${o.value}" ${o.value === current ? 'selected' : ''}>${esc(o.label)}</option>`)
+    .join('');
+  const geminiAccountLabel = (id) => { const a = geminiAccounts().find((x) => x.id === id); return a ? a.email.split('@')[0] : '자동'; };
+  const geminiAccountOptions = (current) => `<option value="" ${!current ? 'selected' : ''}>계정 자동 (한도 많이 남은 쪽)</option>` + geminiAccounts()
+    .map((a) => `<option value="${a.id}" ${a.id === current ? 'selected' : ''}>${esc(a.email)}${a.tier ? ` · ${esc(a.tier)}` : ''}</option>`)
+    .join('');
+  // 단일 모델 실행기의 모델 이름 (Claude는 pipeline에 따라 달라 별도 처리)
+  const singleModelLabel = (agent) => agent.kind === 'codex' ? codexModelLabel(agent.codex_model || codexDefaultModel())
+    : agent.kind === 'gemini' ? geminiModelLabel(agent.gemini_model || geminiDefaultModel())
+    : modelLabel(agent.model);
   // Effort ("강도") per pipeline stage, mirroring the desktop "노력" slider: 더 빠르게 ↔ 더 스마트하게.
   const effortLevels = ['low', 'medium', 'high', 'xhigh', 'max'];
   const effortLabel = { low: '낮음', medium: '중간', high: '높음', xhigh: '매우 높음', max: '최대' };
@@ -76,8 +93,8 @@
     : modelLabel(agent.plan_model || 'fable');
   const stageModelName = (agent, stage) => stage === 'xplan'
     ? crossPlanModelName(agent)
-    : agent.kind === 'codex'
-      ? codexModelLabel(agent.codex_model || codexDefaultModel())
+    : agent.kind !== 'claude'
+      ? singleModelLabel(agent)
       : modelLabel(stage === 'plan' ? agent.plan_model : stage === 'exec' ? agent.exec_model : agent.model);
   // Composer mode chips (권한 · 흐름), mirroring the desktop app's mode menu.
   // [value, 메뉴에 쓰는 이름, 설명, 칩에 쓰는 짧은 이름]
@@ -90,30 +107,43 @@
     codex: [
       ['ask', '읽기 전용', '프로젝트를 읽고 분석만 합니다', '읽기 전용'],
       ['acceptEdits', '워크스페이스 수정', '등록한 폴더 안의 변경을 허용합니다', '수정 허용'],
+      ['auto', '전체 허용', '폴더 밖 파일·프로그램 설치까지 막지 않습니다', '전체 허용'],
+    ],
+    // Gemini는 폴더 안/밖을 나누지 못해 두 단계만 있다.
+    gemini: [
+      ['ask', '읽기 전용', '프로젝트를 읽고 분석만 합니다', '읽기 전용'],
+      ['auto', '전체 허용', '파일 수정·명령 실행을 묻지 않고 진행합니다', '전체 허용'],
     ],
   };
-  const PROVIDER_LABEL = { claude: 'Claude', codex: 'Codex' };
-  const otherKind = (kind) => (kind === 'codex' ? 'claude' : 'codex');
+  const PROVIDER_LABEL = { claude: 'Claude', codex: 'Codex', gemini: 'Gemini' };
+  // 짝: Claude ↔ Codex, Gemini ↔ Claude (계획 분담·검토 상대)
+  const otherKind = (kind) => (kind === 'claude' ? 'codex' : 'claude');
+  // 상대 제공자를 쓸 수 있는지 (Claude는 항상, Codex/Gemini는 설치·계정 필요)
+  const providerReady = (kind) => kind === 'claude' ? true : kind === 'codex' ? !!state.data?.tools?.codex : !!state.data?.tools?.gemini && geminiAccounts().length > 0;
+  const providerBlockedText = (kind) => kind === 'codex' ? 'Codex를 노트북에서 찾지 못했습니다' : kind === 'gemini' ? (!state.data?.tools?.gemini ? 'Antigravity(agy)를 노트북에서 찾지 못했습니다' : '설정에서 Google 계정을 먼저 연결하세요') : '';
   const otherProviderName = (kind) => PROVIDER_LABEL[otherKind(kind)];
   // [value, 메뉴 이름, 설명, 칩 짧은 이름]. Codex는 판단→계획→실행 자동 흐름이 없어 교차 모델 항목이 빠진다.
   const flowOptions = (agent) => [
-    ...(agent.kind === 'codex' ? [] : [['auto', '교차 모델', '판단 → 계획 → 실행을 여러 모델이 나눠 맡습니다']]),
+    ...(agent.kind !== 'claude' ? [] : [['auto', '교차 모델', '판단 → 계획 → 실행을 여러 모델이 나눠 맡습니다']]),
     ['manual', '단일 모델', '모델 하나를 직접 지정해 실행합니다'],
     ['cross', '계획 나눠 맡기', `${otherProviderName(agent.kind)}가 계획서를 쓰고, ${PROVIDER_LABEL[agent.kind]} 단일 모델이 그대로 실행합니다`, '계획 분담'],
     ['debate', '계획 합의', `${otherProviderName(agent.kind)} 초안 → ${PROVIDER_LABEL[agent.kind]} 검토 → ${otherProviderName(agent.kind)} 최종안. 의견이 갈리면 두 쪽 주장을 보고 직접 고릅니다`, '계획 합의'],
   ];
-  const flowValue = (agent) => (agent.kind === 'codex' || agent.pipeline === 'manual') ? (agent.cross_plan ? (agent.plan_debate ? 'debate' : 'cross') : 'manual') : 'auto';
+  const flowValue = (agent) => (agent.kind !== 'claude' || agent.pipeline === 'manual') ? (agent.cross_plan ? (agent.plan_debate ? 'debate' : 'cross') : 'manual') : 'auto';
   // 계획 분담·계획 합의 둘 다 "다른 쪽이 계획, 이쪽이 실행" 구조다.
   const usesCross = (agent) => ['cross', 'debate'].includes(flowValue(agent));
   const permValue = (agent) => {
     const opts = PERM_OPTIONS[agent.kind] || PERM_OPTIONS.claude;
-    return opts.some(([v]) => v === agent.permission_mode) ? agent.permission_mode : agent.kind === 'codex' ? 'acceptEdits' : 'ask';
+    return opts.some(([v]) => v === agent.permission_mode) ? agent.permission_mode : agent.kind === 'codex' ? 'acceptEdits' : agent.kind === 'gemini' ? 'auto' : 'ask';
   };
   const optionLabel = (opts, value) => (opts.find(([v]) => v === value) || opts[0])[1];
   const chipLabel = (opts, value) => { const o = opts.find(([v]) => v === value) || opts[0]; return o[3] || o[1]; };
   const stageEffortField = (agent, stage) => stage === 'manual' && agent?.kind === 'codex' ? 'codex_effort'
+    : stage === 'manual' && agent?.kind === 'gemini' ? 'gemini_effort'
     : stage === 'xplan' && agent?.kind === 'claude' ? 'codex_plan_effort'
     : EFFORT_STAGES[stage].field;
+  // Gemini의 생각 깊이는 낮음/높음 두 단계뿐이라 슬라이더도 세 칸(낮음·중간=기본·높음)만 쓴다.
+  const stageEffortLevels = (agent, stage) => (stage === 'manual' && agent?.kind === 'gemini' ? ['low', 'medium', 'high'] : effortLevels);
   const stageEffort = (agent, stage) => agent?.[stageEffortField(agent, stage)] || null;
   const stageDefaultEffort = (agent, stage) => stage === 'manual' && agent?.kind === 'codex'
     ? state.data?.codex?.effort || null
@@ -327,6 +357,7 @@
       case 'workspace.created':
       case 'workspace.updated':
       case 'workspace.deleted':
+      case 'gemini.accounts':
         refreshState(true);
         break;
     }
@@ -599,7 +630,7 @@
         const cls = { needs_attention: 'attn', working: 'working', done: 'done', error: 'error' }[a.status] || '';
         return `
         <div class="row glass ${cls}" data-agent="${a.id}">
-          <div class="g ${a.kind}">${a.kind === 'codex' ? 'CX' : 'CL'}</div>
+          <div class="g ${a.kind}">${kindMark[a.kind] || 'CL'}</div>
           <div style="min-width:0">
             <div class="t"><strong>${esc(a.name)}</strong></div>
             <div class="s">${esc(snippet.replace(/\s+/g, ' '))}</div>
@@ -683,7 +714,7 @@
   if (tabSettings) tabSettings.onclick = () => $('#btn-settings').click();
 
   // ---------- usage limits ----------
-  const activeUsageProvider = () => state.route.name === 'agent' && state.detail?.agent?.kind === 'codex' ? 'codex' : 'claude';
+  const activeUsageProvider = () => state.route.name === 'agent' && ['codex', 'gemini'].includes(state.detail?.agent?.kind) ? state.detail.agent.kind : 'claude';
   const providerUsage = (provider = activeUsageProvider()) => state.usage?.[provider] || null;
   function usageHTML() {
     const u = providerUsage('claude');
@@ -702,7 +733,7 @@
   }
   function usageSlots(provider = activeUsageProvider()) {
     const items = providerUsage(provider)?.items || [];
-    if (provider === 'codex') return items.map((item) => [item.label, item]);
+    if (provider === 'codex' || provider === 'gemini') return items.map((item) => [item.label, item]);
     return [
       ['5시간 한도', items.find((it) => /5시간|current session/i.test(it.label))],
       ['주간 한도', items.find((it) => /주간.*전체|current week.*all models/i.test(it.label))],
@@ -713,12 +744,27 @@
     const usage = providerUsage();
     if (!usage) return '<div class="usage-empty">사용량을 불러오는 중…</div>';
     if (!usage.ok && !usage.items?.length) return `<div class="usage-empty">사용량을 읽지 못했습니다${usage.error ? `<small>${esc(usage.error)}</small>` : ''}</div>`;
+    if (usage.provider === 'gemini') return geminiUsageHTML(usage) + memoryUsageHTML() + agentTokenUsageHTML();
     const limits = usageSlots().map(([label, item]) => `
       <div class="usage-popover-row">
         <div><strong>${label}</strong><small>${item?.resets ? `리셋 ${esc(item.resets)}` : item ? '리셋 시각 정보 없음' : '별도 사용량 항목 없음'}</small></div>
         <b class="${item?.pct >= 90 ? 'hot' : item?.pct >= 70 ? 'warm' : ''}">${item ? `${item.pct}%` : '—'}</b>
       </div>`).join('');
     return limits + memoryUsageHTML() + agentTokenUsageHTML();
+  }
+  // Gemini: 계정마다 한 묶음. 남은 비율이 아니라 "쓴 비율"로 맞춰 다른 제공자와 같은 눈금을 쓴다.
+  function geminiUsageHTML(usage) {
+    const pinned = state.detail?.agent?.gemini_account || null;
+    return (usage.accounts || []).map((a) => {
+      const rows = a.ok
+        ? (a.items.length ? a.items.map((it) => `
+          <div class="usage-popover-row">
+            <div><strong>${esc(it.label)}</strong><small>${it.resets ? `리셋 ${esc(it.resets)}` : '리셋 시각 정보 없음'}${it.remaining != null ? ` · 남은 요청 ${it.remaining}` : ''}</small></div>
+            <b class="${it.pct >= 90 ? 'hot' : it.pct >= 70 ? 'warm' : ''}">${it.pct}%</b>
+          </div>`).join('') : '<div class="usage-popover-row"><div><small>아직 사용 기록이 없습니다</small></div></div>')
+        : `<div class="usage-popover-row"><div><small>${esc(a.error || '한도를 읽지 못했습니다')}</small></div></div>`;
+      return `<div class="usage-popover-sep">${esc(a.email)}${a.tier ? ` · ${esc(a.tier)}` : ''}${a.id === pinned ? ' · 이 담당자 고정' : ''}</div>${rows}`;
+    }).join('');
   }
   // Cumulative token usage for the currently open agent (per-run cards are computed in tokens.js
   // on the server; this just reads the two rollups it stores alongside GET /agents/:id).
@@ -769,7 +815,7 @@
     const body = $('#usage-popover-body');
     if (body) body.innerHTML = usagePopupHTML();
     const title = $('#usage-title');
-    if (title) title.textContent = `${activeUsageProvider() === 'codex' ? 'Codex' : 'Claude'} 사용 한도`;
+    if (title) title.textContent = `${PROVIDER_LABEL[activeUsageProvider()] || 'Claude'} 사용 한도`;
   }
   async function loadUsage(force, provider = activeUsageProvider()) {
     if (state.usageLoading[provider]) return;
@@ -794,7 +840,6 @@
 
   function composerControlsHTML(agent, locked) {
     const disabled = locked ? 'disabled' : '';
-    const reviewer = agent.kind === 'claude' ? 'Codex' : 'Claude';
     let flow;
     if (agent.kind === 'claude' && agent.pipeline !== 'manual') {
       flow = `
@@ -841,6 +886,17 @@
           <select id="composer-model" aria-label="실행 모델" ${disabled}><option value="" ${!agent.model ? 'selected' : ''}>기본 모델</option>${modelOptions('manual', agent.model || '', agent)}</select>
           <button type="button" class="step-effort" data-stage="manual" aria-haspopup="dialog" aria-expanded="false" title="실행 강도 조절" ${disabled}>${execLabel} · <b>${stageEffortText(agent, 'manual')}</b></button>
         </div>`;
+      } else if (agent.kind === 'gemini') {
+        const current = agent.gemini_model || '';
+        const defaultLabel = geminiModelLabel(geminiDefaultModel());
+        execStep = `
+        <div class="pipeline-step" title="제미나이 모델 선택">
+          <select id="composer-model" aria-label="제미나이 모델" ${disabled}><option value="" ${!current ? 'selected' : ''}>기본 · ${esc(defaultLabel)}</option>${geminiModelOptions(current)}</select>
+          <button type="button" class="step-effort" data-stage="manual" aria-haspopup="dialog" aria-expanded="false" title="생각 깊이 조절" ${disabled}>${execLabel} · <b>${stageEffortText(agent, 'manual')}</b></button>
+        </div>
+        <div class="pipeline-step" title="Google 계정 선택">
+          <select id="composer-account" aria-label="Google 계정" ${disabled}>${geminiAccountOptions(agent.gemini_account || '')}</select><span>계정</span>
+        </div>`;
       } else {
         const current = agent.codex_model || '';
         const defaultLabel = codexModelLabel(codexDefaultModel());
@@ -852,7 +908,6 @@
       }
       flow = plannerStep + execStep + (cross ? '' : `<span class="pipeline-direct">단일 모델</span>`);
     }
-    void reviewer;
     // 단일 모델(계획 분담 포함)은 단계가 한두 개라 양 끝으로 벌리지 않고 왼쪽에 모아 둔다.
     const compact = agent.kind !== 'claude' || agent.pipeline === 'manual';
     return `<div class="pipeline-flow${compact ? ' compact' : ''}" aria-label="자동 실행 흐름">${flow}</div>`;
@@ -868,7 +923,7 @@
     ];
     chips.push(`<button type="button" class="mode-chip" data-menu="flow" aria-haspopup="menu" aria-expanded="false" title="모델 구성" ${locked ? 'disabled' : ''}>${chipLabel(flowOptions(agent), flowValue(agent))}${chevron}</button>`);
     const reviewer = otherProviderName(agent.kind);
-    const reviewDisabled = locked || (!agent.collab_mode && !state.data?.tools?.codex) ? 'disabled' : '';
+    const reviewDisabled = locked || (!agent.collab_mode && !providerReady(otherKind(agent.kind))) ? 'disabled' : '';
     return `<div class="mode-chips">${chips.join('')}</div>
       <label class="review-quick" title="${reviewer}가 구현 결과를 읽기 전용으로 검토한 뒤 원래 모델이 최종 수정합니다">
         <span><em class="reviewer-name">${reviewer}</em> 검토</span>
@@ -913,14 +968,14 @@
       return;
     }
     const { agent, workspace, messages, approvals } = state.detail;
-    const providerName = agent.kind === 'codex' ? 'Codex' : 'Claude';
-    const reviewerName = agent.kind === 'codex' ? 'Claude' : 'Codex';
+    const providerName = PROVIDER_LABEL[agent.kind] || 'Claude';
+    const reviewerName = otherProviderName(agent.kind);
     const flowCopy = agent.collab_mode
       ? `${providerName} 구현 → ${reviewerName} 리뷰 → ${providerName} 수정`
       : usesCross(agent)
         ? `${reviewerName} 계획 → ${providerName} 실행`
-        : agent.kind === 'codex'
-          ? `Codex · ${codexModelLabel(agent.codex_model || codexDefaultModel())} · 단일 모델`
+        : agent.kind !== 'claude'
+          ? `${providerName} · ${singleModelLabel(agent)} · 단일 모델`
           : `${providerName}에서 다음 지시를 이어갑니다`;
     const switchLocked = !!(agent.running || agent.status === 'working' || agent.status === 'needs_attention' || agent.pending_plan);
     $('#topbar-title').textContent = agent.name;
@@ -1048,14 +1103,16 @@
     updateComposerUsage();
     const triageSel = $('#composer-triage'), planSel = $('#composer-plan'), execSel = $('#composer-exec'), manualSel = $('#composer-model');
     if (manualSel) manualSel.onchange = (e) => {
-      const isCodex = state.detail.agent.kind === 'codex';
-      const field = isCodex ? 'codex_model' : 'model';
-      const label = isCodex ? codexModelLabel(e.target.value || codexDefaultModel()) : modelLabel(e.target.value);
+      const k = state.detail.agent.kind;
+      const field = k === 'codex' ? 'codex_model' : k === 'gemini' ? 'gemini_model' : 'model';
+      const label = k === 'codex' ? codexModelLabel(e.target.value || codexDefaultModel()) : k === 'gemini' ? geminiModelLabel(e.target.value || geminiDefaultModel()) : modelLabel(e.target.value);
       return patchAgent({ [field]: e.target.value || null }, `실행 모델을 ${label}로 변경했습니다`).then(() => {
         syncEffortUI('manual');
         renderAgentHead();
       });
     };
+    const accountSel = $('#composer-account');
+    if (accountSel) accountSel.onchange = (e) => patchAgent({ gemini_account: e.target.value || null }, e.target.value ? `Google 계정을 ${geminiAccountLabel(e.target.value)}로 고정했습니다` : '한도가 많이 남은 계정을 자동으로 씁니다').then(() => loadUsage(false, 'gemini'));
     const xplanSel = $('#composer-xplan');
     if (xplanSel) xplanSel.onchange = (e) => {
       const isCodexPlanner = state.detail.agent.kind === 'claude';
@@ -1086,14 +1143,18 @@
     const effortRange = $('#effort-range'), effortValue = $('#effort-value'), effortReset = $('#effort-reset');
     const syncEffortUI = (stage) => {
       const meta = EFFORT_STAGES[stage];
+      const levels = stageEffortLevels(state.detail.agent, stage);
       const current = stageEffort(state.detail.agent, stage);
-      const shown = current || stageDefaultEffort(state.detail.agent, stage) || 'high';
-      effortRange.value = String(Math.max(0, effortLevels.indexOf(shown)));
+      const shown = current || stageDefaultEffort(state.detail.agent, stage) || (levels.includes('high') ? 'high' : levels[levels.length - 1]);
+      effortRange.max = String(levels.length - 1);
+      effortRange.value = String(Math.max(0, levels.indexOf(shown)));
       effortValue.textContent = current ? effortLabel[current] : `${effortLabel[shown]} (기본)`;
       $('#effort-title').textContent = `${meta.title} 강도 · ${stageModelName(state.detail.agent, stage)}`;
       $('#effort-hint').textContent = stage === 'manual' && state.detail.agent.kind === 'codex'
         ? '중간이 속도와 결과 품질의 균형값입니다. 어려운 작업만 높여 주세요.'
-        : meta.hint;
+        : stage === 'manual' && state.detail.agent.kind === 'gemini'
+          ? 'Gemini는 낮음·중간·높음 세 단계입니다(Pro는 낮음·높음만 있어 중간은 높음으로 돕니다).'
+          : meta.hint;
       effortReset.hidden = !current;
       const chip = document.querySelector(`.step-effort[data-stage="${stage}"] b`);
       if (chip) chip.textContent = stageEffortText(state.detail.agent, stage);
@@ -1109,9 +1170,9 @@
       btn.setAttribute('aria-expanded', 'true');
     }));
     if (effortRange) {
-      effortRange.oninput = () => { effortValue.textContent = effortLabel[effortLevels[Number(effortRange.value)]]; };
+      effortRange.oninput = () => { effortValue.textContent = effortLabel[stageEffortLevels(state.detail.agent, effortPopover.dataset.stage)[Number(effortRange.value)]]; };
       effortRange.onchange = async () => {
-        const stage = effortPopover.dataset.stage, level = effortLevels[Number(effortRange.value)];
+        const stage = effortPopover.dataset.stage, level = stageEffortLevels(state.detail.agent, stage)[Number(effortRange.value)];
         try { await patchAgent({ [stageEffortField(state.detail.agent, stage)]: level }, `${EFFORT_STAGES[stage].title} 강도를 ${ro(effortLabel[level])} 변경했습니다`); }
         catch (e) { toast(e.message); }
         syncEffortUI(stage);
@@ -1129,22 +1190,23 @@
       const sessions = a.provider_sessions || {};
       const providerOptions = [
         ['claude', 'Claude', sessions.claude ? '이어서 쓸 대화가 있습니다' : 'Claude Max 구독으로 실행합니다'],
-        ['codex', 'Codex', !state.data?.tools?.codex ? 'Codex를 노트북에서 찾지 못했습니다' : sessions.codex ? '이어서 쓸 대화가 있습니다' : 'ChatGPT 구독으로 실행합니다'],
+        ['codex', 'Codex', !providerReady('codex') ? providerBlockedText('codex') : sessions.codex ? '이어서 쓸 대화가 있습니다' : 'ChatGPT 구독으로 실행합니다'],
+        ['gemini', 'Gemini', !providerReady('gemini') ? providerBlockedText('gemini') : sessions.gemini ? '이어서 쓸 대화가 있습니다' : `Google 구독(${geminiAccounts()[0]?.email?.split('@')[0] || '연결 계정'})으로 실행합니다`],
       ];
       const opts = kind === 'provider' ? providerOptions : kind === 'perm' ? (PERM_OPTIONS[a.kind] || PERM_OPTIONS.claude) : flowOptions(a);
-      // Claude가 실행하고 Codex가 계획을 맡으려면 Codex CLI가 있어야 한다.
-      const crossBlocked = kind === 'flow' && a.kind === 'claude' && !state.data?.tools?.codex;
+      // 계획을 맡을 상대 제공자를 쓸 수 있어야 계획 분담이 된다.
+      const crossBlocked = kind === 'flow' && !providerReady(otherKind(a.kind));
       const current = kind === 'provider' ? a.kind : kind === 'perm' ? permValue(a) : flowValue(a);
       $('#mode-title').textContent = kind === 'provider' ? '어느 쪽으로 실행할까요' : kind === 'perm' ? `권한 · ${PROVIDER_LABEL[a.kind]}` : '모델 구성';
       $('#mode-items').innerHTML = opts.map(([v, label, desc]) => `
         <button type="button" class="menu-item" role="menuitemradio" data-value="${v}" aria-checked="${v === current}" ${crossBlocked && (v === 'cross' || v === 'debate') ? 'disabled' : ''}>
-          <span><b>${label}</b><small>${crossBlocked && (v === 'cross' || v === 'debate') ? 'Codex를 노트북에서 찾지 못했습니다' : desc}</small></span><i aria-hidden="true">✓</i>
+          <span><b>${label}</b><small>${crossBlocked && (v === 'cross' || v === 'debate') ? providerBlockedText(otherKind(a.kind)) : desc}</small></span><i aria-hidden="true">✓</i>
         </button>`).join('');
       // The provider menu carries the limit-failover switch, since both are about "who runs this".
       const failoverRow = kind !== 'provider' ? '' : `
         <label class="menu-switch">
           <span><b>한도가 차면 자동 전환</b><small>${PROVIDER_LABEL[a.kind]} 한도에 걸리면 ${otherProviderName(a.kind)}가 이어서 한 번 실행합니다</small></span>
-          <input id="auto-failover" type="checkbox" ${a.auto_failover ? 'checked' : ''} ${state.data?.tools?.codex ? '' : 'disabled'}>
+          <input id="auto-failover" type="checkbox" ${a.auto_failover ? 'checked' : ''} ${providerReady(otherKind(a.kind)) ? '' : 'disabled'}>
         </label>`;
       $('#mode-items').insertAdjacentHTML('beforeend', failoverRow);
       const failover = $('#auto-failover');
@@ -1203,7 +1265,7 @@
     }
     const collab = $('#collab-mode');
     if (collab) collab.onchange = async () => {
-      if (collab.checked && !confirm('교차 협업을 켜면 이 에이전트의 원래 지시, 최근 핵심 대화, 구현 결과와 Git 변경 파일 목록이 Claude와 Codex 양쪽에 전달됩니다. 두 모델은 같은 프로젝트 파일을 순서대로 확인합니다. 교차 협업을 켤까요?')) {
+      if (collab.checked && !confirm(`교차 협업을 켜면 이 에이전트의 원래 지시, 최근 핵심 대화, 구현 결과와 Git 변경 파일 목록이 ${PROVIDER_LABEL[state.detail.agent.kind]}와 ${otherProviderName(state.detail.agent.kind)} 양쪽에 전달됩니다. 두 모델은 같은 프로젝트 파일을 순서대로 확인합니다. 교차 협업을 켤까요?`)) {
         collab.checked = false;
         return;
       }
@@ -1280,8 +1342,8 @@
     if (pill) { pill.className = `badge ${a.status}`; pill.textContent = agentStatusText(a); }
     const flow = $('#provider-flow');
     if (flow) {
-      const owner = a.kind === 'codex' ? 'Codex' : 'Claude';
-      const reviewer = a.kind === 'codex' ? 'Claude' : 'Codex';
+      const owner = PROVIDER_LABEL[a.kind] || 'Claude';
+      const reviewer = otherProviderName(a.kind);
       const activeProvider = a.collab_stage === 'review' ? reviewer : owner;
       flow.textContent = a.collab_stage
         ? `${activeProvider} · ${collabStageLabel[a.collab_stage] || '협업 중'}`
@@ -1289,8 +1351,8 @@
           ? `${owner} 구현 → ${reviewer} 리뷰 → ${owner} 수정`
           : usesCross(a)
             ? flowValue(a) === 'debate' ? `${reviewer} 계획 → ${owner} 검토 → 합의 → ${owner} 실행` : `${reviewer} 계획 → ${owner} 실행`
-            : a.kind === 'codex'
-              ? `Codex · ${codexModelLabel(a.codex_model || codexDefaultModel())} · 단일 모델`
+            : a.kind !== 'claude'
+              ? `${owner} · ${singleModelLabel(a)} · 단일 모델`
               : `${owner}에서 다음 지시를 이어갑니다`;
     }
     const pendingPlan = !!a.pending_plan;
@@ -1461,10 +1523,11 @@
       const source = m.role === 'assistant' && meta.provider
         ? `<span class="msg-source">${esc(kindLabel[meta.provider] || meta.provider)}${meta.phase ? ` · ${esc(phaseLabel[meta.phase] || meta.phase)}` : ''}</span>`
         : '';
+      const pcBadge = meta.desktop ? '<span class="msg-skill">PC 클로드 앱</span>' : '';
       const skillBadge = m.role === 'user' && meta.skill ? `<span class="msg-skill">스킬 · ${esc(meta.skill.name)}</span>`
         : m.role === 'user' && meta.steered ? '<span class="msg-skill">처리 중 끼워 넣음</span>'
         : m.role === 'user' && meta.auto ? '<span class="msg-skill">자동 · 배경 작업 확인</span>' : '';
-      el.innerHTML = source + skillBadge + (m.role === 'assistant' ? rich(m.content) : esc(m.content))
+      el.innerHTML = source + pcBadge + skillBadge + (m.role === 'assistant' ? rich(m.content) : esc(m.content))
         + (m.role === 'user' ? messageAttachmentsHTML(meta) : '')
         + (m.role === 'user' || m.role === 'assistant' ? `<span class="time">${clock(m.created_at)}${m.role === 'assistant' && 'speechSynthesis' in window ? `<button type="button" class="speak-btn" aria-label="읽어주기">${ICON.speaker}</button>` : ''}</span>` : '');
       const sp = el.querySelector('.speak-btn');
@@ -1751,6 +1814,45 @@
       refreshState(true);
     } catch (err) { $('#ws-error').textContent = err.message; $('#ws-error').hidden = false; }
   });
+  // ---------- PC 클로드 앱 대화 가져오기 ----------
+  // 같은 세션을 그대로 이어 쓰므로 폰에서 한 지시와 답도 PC 쪽 기록에 그대로 쌓인다.
+  $('#ws-import').onclick = () => { $('#dlg-ws').close(); openImportDesktop(); };
+  async function openImportDesktop() {
+    const host = $('#import-list');
+    $('#import-error').hidden = true;
+    host.innerHTML = '<div class="import-empty">PC 클로드 앱 목록을 읽는 중…</div>';
+    updateImportCount();
+    $('#dlg-import').showModal();
+    let rows;
+    try { rows = await api('/desktop-sessions'); } catch (e) { host.innerHTML = `<div class="import-empty">${esc(e.message)}</div>`; return; }
+    rows = rows.filter((r) => !r.archived);
+    if (!rows.length) { host.innerHTML = '<div class="import-empty">PC 클로드 앱에 대화가 없습니다.</div>'; return; }
+    const groups = new Map();
+    for (const r of rows) { const g = r.group || '그룹 없음'; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(r); }
+    host.innerHTML = [...groups].map(([g, list]) => `<div class="import-group">${esc(g)}</div>` + list.map((r) => {
+      const off = !!r.agent_id || !r.resumable;
+      const sub = r.agent_id ? '이미 가져옴' : !r.resumable ? esc(r.reason) : `${esc(tailPath(r.cwd, 28))} · ${ago(r.last_activity_at)}`;
+      return `<label class="import-row ${off ? 'off' : ''}"><input type="checkbox" value="${esc(r.host_id)}" ${off ? 'disabled' : ''}><span><strong>${esc(r.title)}</strong><small>${sub}</small></span></label>`;
+    }).join('')).join('');
+    host.querySelectorAll('input').forEach((i) => (i.onchange = updateImportCount));
+  }
+  function updateImportCount() {
+    const n = $('#import-list').querySelectorAll('input:checked').length;
+    $('#import-submit').textContent = n ? `가져오기 (${n})` : '가져오기';
+    $('#import-submit').disabled = !n;
+  }
+  $('#form-import').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const ids = [...$('#import-list').querySelectorAll('input:checked')].map((i) => i.value);
+    if (!ids.length) return;
+    $('#import-submit').disabled = true;
+    try {
+      const r = await api('/desktop-sessions/import', { method: 'POST', body: { host_ids: ids } });
+      $('#dlg-import').close();
+      toast(`${r.created.length}개 가져옴${r.skipped.length ? ` · ${r.skipped.length}개 건너뜀` : ''}`);
+      refreshState(true);
+    } catch (err) { $('#import-error').textContent = err.message; $('#import-error').hidden = false; updateImportCount(); }
+  });
   // ---------- GitHub repository ----------
   function repoChipHTML(w) {
     const r = w.repo;
@@ -2027,26 +2129,41 @@
     });
     $('#agent-name').value = '';
     $('#agent-collab').checked = false;
-    $('#agent-collab').disabled = !state.data?.tools?.codex;
+    const geminiOpt = $('#agent-kind').querySelector('option[value="gemini"]');
+    if (geminiOpt) { geminiOpt.disabled = !providerReady('gemini'); geminiOpt.textContent = providerReady('gemini') ? 'Gemini' : `Gemini · ${providerBlockedText('gemini')}`; }
+    if ($('#agent-kind').value === 'gemini' && !providerReady('gemini')) $('#agent-kind').value = 'claude';
     syncAgentKindForm();
     $('#dlg-agent').showModal();
   }
   function syncAgentKindForm() {
-    const codex = $('#agent-kind').value === 'codex';
+    const kind = $('#agent-kind').value;
+    const codex = kind === 'codex', gemini = kind === 'gemini', single = codex || gemini;
     $('#claude-opts').hidden = false;
-    $('#agent-pipeline-field').hidden = codex;
-    $('#auto-opts').hidden = codex || $('#agent-pipeline').value !== 'auto';
-    $('#manual-opts').hidden = !codex && $('#agent-pipeline').value === 'auto';
+    $('#agent-pipeline-field').hidden = single;
+    $('#auto-opts').hidden = single || $('#agent-pipeline').value !== 'auto';
+    $('#manual-opts').hidden = !single && $('#agent-pipeline').value === 'auto';
     const model = $('#agent-model');
     model.innerHTML = codex
       ? `<option value="">기본 · ${esc(codexModelLabel(codexDefaultModel()))}</option>${codexModelOptions('')}`
-      : `<option value="">기본 (클로드 설정값)</option>${modelOptions('manual', '', null)}`;
+      : gemini
+        ? `<option value="">기본 · ${esc(geminiModelLabel(geminiDefaultModel()))}</option>${geminiModelOptions('')}`
+        : `<option value="">기본 (클로드 설정값)</option>${modelOptions('manual', '', null)}`;
     const perm = $('#agent-perm');
     const previous = perm.value;
     perm.innerHTML = codex
-      ? '<option value="ask">읽기 전용</option><option value="acceptEdits">워크스페이스 수정</option>'
-      : '<option value="ask">매번 폰에서 승인</option><option value="acceptEdits">파일 수정은 자동, 명령은 승인</option><option value="auto">자동 (분류기 판단)</option>';
-    perm.value = codex ? (previous === 'ask' ? 'ask' : 'acceptEdits') : (['ask', 'acceptEdits', 'auto'].includes(previous) ? previous : 'ask');
+      ? '<option value="ask">읽기 전용</option><option value="acceptEdits">워크스페이스 수정</option><option value="auto">전체 허용 (폴더 밖·설치까지)</option>'
+      : gemini
+        ? '<option value="ask">읽기 전용</option><option value="auto">전체 허용 (묻지 않고 수정·실행)</option>'
+        : '<option value="ask">매번 폰에서 승인</option><option value="acceptEdits">파일 수정은 자동, 명령은 승인</option><option value="auto">자동 (분류기 판단)</option>';
+    const allowed = [...perm.options].map((o) => o.value);
+    perm.value = allowed.includes(previous) ? previous : codex ? 'acceptEdits' : gemini ? 'auto' : 'ask';
+    // Gemini는 강도가 낮음·중간(기본)·높음까지만 있다.
+    $('#agent-effort').querySelectorAll('option').forEach((o) => { o.hidden = gemini && ['xhigh', 'max'].includes(o.value); });
+    if (gemini && ['xhigh', 'max'].includes($('#agent-effort').value)) $('#agent-effort').value = 'high';
+    const collab = $('#agent-collab');
+    collab.disabled = !providerReady(otherKind(kind));
+    const collabText = collab.parentElement?.childNodes[collab.parentElement.childNodes.length - 1];
+    if (collabText && collabText.nodeType === 3) collabText.textContent = ` ${PROVIDER_LABEL[kind]}와 ${otherProviderName(kind)} 교차 협업 사용`;
   }
   $('#agent-kind').onchange = syncAgentKindForm;
   $('#agent-pipeline').onchange = (e) => { const auto = e.target.value === 'auto'; $('#auto-opts').hidden = !auto; $('#manual-opts').hidden = auto; };
@@ -2060,7 +2177,9 @@
         effort: $('#agent-kind').value === 'claude' ? ($('#agent-effort').value || null) : null,
         codex_model: $('#agent-kind').value === 'codex' ? ($('#agent-model').value || null) : null,
         codex_effort: $('#agent-kind').value === 'codex' ? ($('#agent-effort').value || null) : null,
-        pipeline: $('#agent-kind').value === 'codex' ? 'manual' : $('#agent-pipeline').value,
+        gemini_model: $('#agent-kind').value === 'gemini' ? ($('#agent-model').value || null) : null,
+        gemini_effort: $('#agent-kind').value === 'gemini' ? ($('#agent-effort').value || null) : null,
+        pipeline: $('#agent-kind').value !== 'claude' ? 'manual' : $('#agent-pipeline').value,
         plan_model: $('#agent-plan-model').value, exec_model: $('#agent-exec-model').value,
         collab_mode: $('#agent-collab').checked,
       } });
@@ -2365,6 +2484,8 @@
     $('#set-host').textContent = state.data?.computer.name || location.host;
     $('#set-claude').textContent = state.data?.tools.claude || '';
     $('#set-codex').textContent = state.data?.tools.codex ? '설치됨' : '미설치';
+    $('#set-gemini').textContent = state.data?.tools.gemini ? '설치됨' : '미설치';
+    renderGeminiAccounts();
     updatePushStatus();
     api('/digest').then((d) => { $('#digest-enabled').checked = !!d.settings.enabled; $('#digest-time').value = d.settings.time; }).catch(() => {});
     loadBackupStatus();
@@ -2373,6 +2494,75 @@
     $('#tts-enabled').checked = ttsEnabled();
     $('#dlg-settings').showModal();
   };
+  // ---------- Gemini · Google 계정 ----------
+  let geminiLogin = null; // { loginId, url } while a sign-in is in progress
+  async function renderGeminiAccounts(refresh = false) {
+    const host = $('#gemini-accounts');
+    if (!host) return;
+    if (!state.data?.tools?.gemini) {
+      host.innerHTML = '<p class="muted small">이 PC에 Antigravity 프로그램(agy)이 없습니다. PowerShell에서 irm https://antigravity.google/cli/install.ps1 | iex 를 실행한 뒤 다시 열어 주세요.</p>';
+      return;
+    }
+    host.innerHTML = '<p class="muted small">계정 확인 중…</p>';
+    let accounts = [];
+    try { accounts = (await api(`/gemini/accounts${refresh ? '?refresh=1' : ''}`)).accounts || []; }
+    catch (e) { host.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }
+    if (!accounts.length) {
+      host.innerHTML = '<p class="muted small">아직 연결한 Google 계정이 없습니다. 아래 "계정 추가"로 구독 계정을 하나씩 연결하세요(여러 개 가능). PC에서 터미널에 agy 를 실행해 로그인해도 됩니다.</p>';
+      return;
+    }
+    try {
+      host.innerHTML = accounts.map((a) => {
+        const items = a.items || a.models || [];
+        const worst = a.ok && items.length ? Math.max(...items.map((it) => it.pct)) : null;
+        const rows = a.ok
+          ? (items.length ? items.map((it) => `<span class="gq ${it.pct >= 90 ? 'hot' : it.pct >= 70 ? 'warm' : ''}">${esc(it.label)} <b>${it.pct}%</b></span>`).join('') : '<span class="muted small">아직 사용 기록 없음</span>')
+          : `<span class="muted small">${esc(a.error || '한도를 읽지 못했습니다')}</span>`;
+        return `<div class="gacct">
+          <div class="gacct-head"><div><b>${esc(a.email)}</b><small>${a.kind === 'keyring' ? 'PC 로그인' : '폰에서 추가'}${a.tier ? ` · ${esc(a.tier)}` : ''}${worst != null ? ` · 가장 많이 쓴 항목 ${worst}%` : ''}</small></div><button class="btn small" type="button" data-gemini-remove="${a.id}">해제</button></div>
+          <div class="gacct-rows">${rows}</div>
+        </div>`;
+      }).join('');
+    } catch (e) {
+      host.innerHTML = `<p class="muted small">계정 표시 오류: ${esc(e.message)}</p>`;
+    }
+    host.querySelectorAll('[data-gemini-remove]').forEach((b) => (b.onclick = async () => {
+      const acct = accounts.find((x) => x.id === b.dataset.geminiRemove);
+      if (!confirm(`${acct?.email || '이 계정'} 연결을 해제할까요?${acct?.kind === 'keyring' ? ' PC의 Antigravity에서도 로그아웃됩니다.' : ''} 이 계정에 고정된 담당자는 자동 선택으로 바뀝니다.`)) return;
+      try { await api(`/gemini/accounts/${b.dataset.geminiRemove}`, { method: 'DELETE' }); toast('연결을 해제했습니다'); await refreshState(true); renderGeminiAccounts(); }
+      catch (e) { toast(e.message); }
+    }));
+  }
+  $('#gemini-add').onclick = async () => {
+    const btn = $('#gemini-add');
+    btn.disabled = true;
+    try {
+      geminiLogin = await api('/gemini/login/start', { method: 'POST' });
+      $('#gemini-login').hidden = false;
+      $('#gemini-login-url').href = geminiLogin.url;
+      $('#gemini-code').value = '';
+      $('#gemini-code').focus();
+    } catch (e) { toast(e.message); }
+    finally { btn.disabled = false; }
+  };
+  $('#gemini-login-cancel').onclick = () => { $('#gemini-login').hidden = true; geminiLogin = null; };
+  $('#gemini-login-finish').onclick = async () => {
+    if (!geminiLogin) return;
+    const code = $('#gemini-code').value.trim();
+    if (!code) return toast('로그인 페이지가 보여준 코드를 붙여 넣어 주세요');
+    const btn = $('#gemini-login-finish');
+    btn.disabled = true; btn.textContent = '확인 중…';
+    try {
+      const { account } = await api('/gemini/login/finish', { method: 'POST', body: { loginId: geminiLogin.loginId, code } });
+      $('#gemini-login').hidden = true; geminiLogin = null;
+      toast(`${account.email} 연결 완료${account.tier ? ` · ${account.tier}` : ''}`);
+      await refreshState(true);
+      renderGeminiAccounts(true);
+    } catch (e) { toast(e.message); }
+    finally { btn.disabled = false; btn.textContent = '연결'; }
+  };
+  $('#gemini-refresh').onclick = () => renderGeminiAccounts(true);
+
   // ---------- 방해금지 시간 ----------
   function renderQuiet(q) {
     $('#quiet-enabled').checked = !!q.enabled;

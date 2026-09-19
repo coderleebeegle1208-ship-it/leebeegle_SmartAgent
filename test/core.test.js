@@ -72,6 +72,18 @@ test('Codex model and reasoning choice are passed to the CLI', () => {
   assert.equal(args[args.indexOf('-m') + 1], 'gpt-5.6-terra');
 });
 
+test('Codex sandbox follows the agent permission: read-only / workspace-write(+network) / full access', () => {
+  const build = (permission_mode) => buildCodexArgs({ pre: [] }, { permission_mode, session_id: null, model: null }, { path: 'C:\\project' }, '작업');
+  const sandboxOf = (args) => args[args.indexOf('--sandbox') + 1];
+  assert.equal(sandboxOf(build('ask')), 'read-only');
+  const ws = build('acceptEdits');
+  assert.equal(sandboxOf(ws), 'workspace-write');
+  assert.ok(ws.includes('sandbox_workspace_write.network_access=true'));
+  const full = build('auto');
+  assert.equal(sandboxOf(full), 'danger-full-access');
+  assert.ok(!full.includes('sandbox_workspace_write.network_access=true'));
+});
+
 test('Codex always gets bounded context, tool output, and concise response settings', () => {
   const args = buildCodexArgs(
     { pre: [] },
@@ -651,6 +663,10 @@ test('expandSkill substitutes $ARGUMENTS/$1.., points at the absolute skill fold
     const truncated = expandSkill(longSkill, '', { maxChars: 500 });
     assert.ok(truncated.length < 600);
     assert.match(truncated, /잘림/);
+    // 긴 스킬(ui-ux-pro-max 55KB)이라도 사용자의 요청은 잘리지 않게 본문 앞에 온다
+    const longWithRequest = expandSkill(longSkill, '런처를 다크모드로 바꿔줘', { maxChars: 500 });
+    assert.ok(longWithRequest.includes('[요청] 런처를 다크모드로 바꿔줘'));
+    assert.ok(longWithRequest.indexOf('[요청]') < longWithRequest.indexOf('xxxx'));
   } finally {
     fs.rmSync(wsPath, { recursive: true, force: true });
     fs.rmSync(userDir, { recursive: true, force: true });
@@ -1147,7 +1163,7 @@ const { riskLevel, LEVEL_LABEL } = await import('../server/approvals.js');
 const { inQuietWindow, saveQuietSettings, quietSettings, isQuietNow, holdNotification, heldNotifications, heldSummary, clearHeld } = await import('../server/quiet.js');
 const { sendPush } = await import('../server/push.js');
 const { flushHeldIfMorning } = await import('../server/scheduler.js');
-const { judgeLog, startJob, watchLog, finishJob, tickJobs, jobsForAgent, jobFollowUpPrompt, setJobFinishedHandler, MAX_ATTEMPTS } = await import('../server/jobs.js');
+const { judgeLog, startJob, watchLog, finishJob, tickJobs, jobsForAgent, jobFollowUpPrompt, setJobFinishedHandler, cancelJobs, MAX_ATTEMPTS } = await import('../server/jobs.js');
 const { handleCallbackData, handleText, telegramStatus, unlinkTelegram, muteTelegram, isMuted } = await import('../server/telegram.js');
 const { Settings: KV } = await import('../server/db.js');
 
@@ -1256,6 +1272,18 @@ test('background jobs: the server runs the command, keeps a log, and calls the a
   assert.equal(finished.at(-1).outcome, 'done');
   assert.equal(finished.at(-1).job.id, w.id);
   assert.equal(finishJob(9999), null);
+
+  // 중지 버튼: 돌고 있는 배경 작업을 끊고 목록에서 지우되, 후속 지시(재시도)는 넣지 않는다
+  const before = finished.length;
+  const longRun = startJob(agent.id, { command: 'ping -n 30 127.0.0.1 > nul', label: 'v50 쇼츠 재렌더', workspacePath: wsPath, shell: 'cmd' });
+  assert.equal(jobsForAgent(agent.id).length, 1);
+  assert.equal(cancelJobs(agent.id), 1);
+  assert.equal(jobsForAgent(agent.id).length, 0);
+  assert.equal(cancelJobs(agent.id), 0);
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(finished.length, before, 'a cancelled job must not trigger the retry follow-up');
+  assert.ok(Messages.forAgent(agent.id).some((m) => m.role === 'system' && /배경 작업 중지 · v50 쇼츠 재렌더/.test(m.content)));
+  assert.equal(finishJob(longRun.id), null);
 
   setJobFinishedHandler(null);
   Agents.remove(agent.id); Workspaces.remove(ws.id);

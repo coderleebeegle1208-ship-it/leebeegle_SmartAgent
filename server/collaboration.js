@@ -2,11 +2,12 @@
 // Prompts carry only bounded conversation excerpts and a Git file manifest;
 // both providers inspect the shared workspace directly for source details.
 
-const PROVIDER_LABEL = { claude: 'Claude', codex: 'Codex' };
+const PROVIDER_LABEL = { claude: 'Claude', codex: 'Codex', gemini: 'Gemini' };
 const ROLE_LABEL = { user: '사용자', assistant: '응답', plan: '계획' };
 
+/** The counterpart for reviews/planning: Claude pairs with Codex, and Codex or Gemini pair with Claude. */
 export function otherProvider(kind) {
-  return kind === 'codex' ? 'claude' : 'codex';
+  return kind === 'claude' ? 'codex' : 'claude';
 }
 
 export function compactConversation(messages, maxChars = 6000) {

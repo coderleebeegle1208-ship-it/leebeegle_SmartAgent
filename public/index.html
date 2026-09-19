@@ -56,6 +56,7 @@
   <dialog id="dlg-ws">
     <form method="dialog" class="form" id="form-ws">
       <h2>워크스페이스 추가</h2>
+      <button class="btn import-pc" type="button" id="ws-import">PC 클로드 앱 대화 가져오기</button>
       <label>이름 <input id="ws-name" placeholder="비우면 폴더 이름"></label>
       <label>폴더 경로 <input id="ws-path" placeholder="C:\Users\...\project" required></label>
       <div class="browser" id="ws-browser"></div>
@@ -64,6 +65,20 @@
         <button class="btn primary" id="ws-submit">추가</button>
       </div>
       <p class="error" id="ws-error" hidden></p>
+    </form>
+  </dialog>
+
+  <!-- import chats from the desktop Claude app -->
+  <dialog id="dlg-import">
+    <form method="dialog" class="form" id="form-import">
+      <h2>PC 클로드 앱 대화 가져오기</h2>
+      <p class="hint">고른 대화는 PC와 같은 기록을 그대로 이어 씁니다. 폰에서 한 지시와 답은 PC에서 그 대화를 다시 열면 보이고, PC에서 한 대화는 폰에 자동으로 나타납니다. 한쪽이 답하는 중에는 다른 쪽에서 지시하지 마세요.</p>
+      <div class="import-list" id="import-list"></div>
+      <div class="row-flex end">
+        <button class="btn" type="button" data-close>취소</button>
+        <button class="btn primary" id="import-submit">가져오기</button>
+      </div>
+      <p class="error" id="import-error" hidden></p>
     </form>
   </dialog>
 
@@ -101,6 +116,7 @@
         <select id="agent-kind">
           <option value="claude">Claude Code</option>
           <option value="codex">Codex</option>
+          <option value="gemini">Gemini</option>
         </select>
       </label>
       <label>이름 <input id="agent-name" placeholder="예: 리팩터링"></label>
@@ -213,96 +229,228 @@
   </dialog>
 
   <!-- settings -->
-  <dialog id="dlg-settings">
-    <div class="form">
-      <h2>설정</h2>
-      <div class="kv"><span>서버</span><span id="set-host" class="mono"></span></div>
-      <div class="kv"><span>Claude</span><span id="set-claude" class="mono small"></span></div>
-      <div class="kv"><span>Codex</span><span id="set-codex" class="mono"></span></div>
-      <hr>
-      <h3>알림</h3>
-      <p class="muted small">홈 화면에 설치한 뒤 켜면 승인 요청·완료 알림이 폰으로 옵니다.</p>
-      <div class="row-flex">
-        <button class="btn primary" id="btn-push">푸시 알림 켜기</button>
-        <button class="btn" id="btn-push-test">테스트</button>
-      </div>
-      <p class="muted small" id="push-status"></p>
-      <hr>
-      <h3>오늘 한 일 요약</h3>
-      <p class="muted small">매일 정한 시각에 에이전트별로 무엇을 했고 얼마나 썼는지 한 장으로 알려드립니다.</p>
-      <div class="row-flex">
-        <label class="check" style="flex:1"><input type="checkbox" id="digest-enabled"> 매일 알림</label>
-        <input type="time" id="digest-time" class="time-input" aria-label="요약 알림 시각">
-      </div>
-      <div class="row-flex">
-        <button class="btn" id="btn-digest-view">오늘 요약 보기</button>
-        <button class="btn" id="btn-digest-send">지금 알림 보내기</button>
-      </div>
-      <hr>
-      <h3>방해금지 시간</h3>
-      <p class="muted small">이 시간에는 폰 알림을 참았다가, 끝나는 시각에 "밤사이 보고 N건" 한 장으로 모아서 보냅니다. 안전한 승인 요청은 자리 비움 규칙대로 알아서 진행되고, 위험한 요청은 아침에 보고 결정하면 됩니다.</p>
-      <div class="row-flex">
-        <label class="check" style="flex:1"><input type="checkbox" id="quiet-enabled"> 알림 참기</label>
-        <input type="time" id="quiet-start" class="time-input" aria-label="시작 시각">
-        <span class="muted small">~</span>
-        <input type="time" id="quiet-end" class="time-input" aria-label="끝 시각">
-      </div>
-      <p class="muted small" id="quiet-status"></p>
-      <hr>
-      <h3>텔레그램으로 받기</h3>
-      <p class="muted small">앱을 열지 않아도 승인 요청과 완료 보고가 텔레그램으로 오고, 버튼으로 바로 허용·거부하거나 답장으로 새 지시를 보낼 수 있습니다.</p>
-      <div id="tg-setup">
-        <ol class="muted small tg-steps">
-          <li>텔레그램에서 <b>@BotFather</b>를 찾아 <b>/newbot</b>을 보내고 이름을 정합니다.</li>
-          <li>BotFather가 주는 긴 토큰을 아래에 붙여넣고 "연결"을 누릅니다.</li>
-        </ol>
-        <div class="row-flex">
-          <input id="tg-token" class="mono" placeholder="123456789:AAxxxxxxxx…" autocomplete="off" style="flex:1">
-          <button class="btn primary" id="btn-tg-connect">연결</button>
+  <dialog id="dlg-settings" class="dialog-settings-modern">
+    <div class="settings-header">
+      <h2>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2.5"/><circle cx="10" cy="17" r="2.5"/></svg>
+        설정
+      </h2>
+      <button class="settings-close-icon" type="button" data-close aria-label="닫기">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+
+    <div class="settings-scroll-body">
+      <!-- 1. 시스템 및 엔진 -->
+      <div class="settings-section">
+        <div class="settings-section-title">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+          시스템 및 엔진
         </div>
-      </div>
-      <div id="tg-linked" hidden>
-        <div class="kv"><span>봇</span><span id="tg-bot" class="mono"></span></div>
-        <p class="muted small" id="tg-state"></p>
-        <div id="tg-pair" class="tg-pair" hidden>
-          <span>내 봇에게 이 번호를 보내주세요</span>
-          <b id="tg-pair-code" class="mono"></b>
-        </div>
-        <div class="tg-mute" id="tg-mute">
-          <div class="kv"><span>알림</span><b id="tg-mute-state">켜짐</b></div>
-          <div class="row-flex" id="tg-mute-opts">
-            <button class="chip" data-mute="60">1시간 끄기</button>
-            <button class="chip" data-mute="180">3시간 끄기</button>
-            <button class="chip" data-mute="">다시 켤 때까지</button>
+        <div class="sys-grid">
+          <div class="sys-box">
+            <span class="sys-box-label">호스트 서버</span>
+            <span class="sys-box-val"><span class="sys-dot green"></span><span id="set-host" class="mono"></span></span>
           </div>
-          <button class="btn" id="btn-tg-unmute" hidden>알림 다시 켜기</button>
+          <div class="sys-box">
+            <span class="sys-box-label">Claude 엔진</span>
+            <span class="sys-box-val"><span class="sys-dot blue"></span><span id="set-claude" class="mono small"></span></span>
+          </div>
+          <div class="sys-box">
+            <span class="sys-box-label">Codex 엔진</span>
+            <span class="sys-box-val"><span class="sys-dot green"></span><span id="set-codex" class="mono"></span></span>
+          </div>
+          <div class="sys-box">
+            <span class="sys-box-label">Gemini (Antigravity)</span>
+            <span class="sys-box-val"><span class="sys-dot purple"></span><span id="set-gemini" class="mono"></span></span>
+          </div>
         </div>
-        <div class="row-flex">
-          <button class="btn" id="btn-tg-test">테스트</button>
-          <div class="spacer"></div>
-          <button class="btn danger" id="btn-tg-unlink">연결 끊기</button>
+      </div>
+
+      <!-- 2. Gemini 계정 및 구독 한도 -->
+      <div class="settings-section">
+        <div class="settings-section-title">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          Gemini 계정 및 구독 한도
+        </div>
+        <div class="settings-card">
+          <div style="padding:10px 14px 4px;">
+            <p class="muted small" style="margin:0; font-size:11.5px; line-height:1.4;">PC에서 로그인한 계정과 추가한 구독 계정의 잔여 한도를 자동으로 배분해 사용합니다.</p>
+          </div>
+          <div id="gemini-accounts" style="padding:0 8px;"></div>
+          <div id="gemini-login" hidden style="padding:12px 14px; background:var(--bg); border-top:1px solid var(--line);">
+            <ol class="muted small tg-steps" style="margin:0 0 10px; padding-left:18px;">
+              <li><a id="gemini-login-url" href="#" target="_blank" rel="noopener"><b>Google 로그인 열기</b></a> → 로그인 후 허용을 누릅니다.</li>
+              <li>표시되는 코드를 복사해 붙여 넣고 연결을 누릅니다.</li>
+            </ol>
+            <div class="row-flex">
+              <input id="gemini-code" class="mono" placeholder="로그인 화면의 코드" autocomplete="off" style="flex:1">
+              <button class="btn primary" type="button" id="gemini-login-finish">연결</button>
+              <button class="btn" type="button" id="gemini-login-cancel">취소</button>
+            </div>
+          </div>
+          <div class="settings-btn-grid">
+            <button class="btn" type="button" id="gemini-add">+ 계정 추가</button>
+            <button class="btn" type="button" id="gemini-refresh">한도 새로고침</button>
+          </div>
         </div>
       </div>
-      <hr>
-      <h3>보고 읽어주기</h3>
-      <p class="muted small">작업이 끝나면 완료 보고를 폰이 소리 내어 읽어줍니다. 이동 중에 화면을 보지 않아도 됩니다. 말풍선의 스피커 버튼으로 골라 들을 수도 있습니다.</p>
-      <label class="check"><input type="checkbox" id="tts-enabled"> 완료 보고 자동으로 읽어주기</label>
-      <hr>
-      <h3>자리 비웠을 때</h3>
-      <p class="muted small">승인 요청에 10분간 답이 없으면 한 번 더 알리고, 20분이 지나면 안전한 요청(읽기·작업 폴더 안 편집)만 자동으로 허용해 일이 멈춰 있지 않게 합니다. 작업 폴더 밖 변경이나 질문은 끝까지 기다립니다.</p>
-      <hr>
-      <h3>자동 백업</h3>
-      <p class="muted small">대화 기록과 설정을 매일 한 번 복사해 두고 최근 14일치를 보관합니다. PC가 켜져 있으면 그날 자동으로 됩니다.</p>
-      <div class="row-flex">
-        <span class="muted small" id="backup-status" style="flex:1">확인 중…</span>
-        <button class="btn" id="btn-backup-now">지금 백업</button>
+
+      <!-- 3. 알림 및 브리핑 -->
+      <div class="settings-section">
+        <div class="settings-section-title">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          알림 및 브리핑
+        </div>
+        <div class="settings-card">
+          <div class="settings-row">
+            <div class="settings-col">
+              <div class="settings-title">폰 푸시 알림</div>
+              <div class="settings-desc" id="push-status">승인 요청과 작업 완료 알림이 폰으로 옵니다</div>
+            </div>
+            <div style="display:flex; gap:6px;">
+              <button class="btn primary small" id="btn-push">푸시 알림 켜기</button>
+              <button class="btn small" id="btn-push-test">테스트</button>
+            </div>
+          </div>
+
+          <div class="settings-row">
+            <div class="settings-col">
+              <div class="settings-title">오늘 한 일 요약 알림</div>
+              <div class="settings-desc">매일 정한 시각에 작업 요약을 한 장으로 전달</div>
+            </div>
+            <label class="switch-control">
+              <input type="checkbox" id="digest-enabled">
+              <span class="switch-slider"></span>
+            </label>
+          </div>
+          <div class="settings-row" style="background:rgba(255,255,255,0.02);">
+            <div class="settings-col">
+              <span style="font-size:12.5px; color:var(--ink-2);">발송 시각</span>
+            </div>
+            <input type="time" id="digest-time" class="time-input" aria-label="요약 알림 시각" style="height:34px; border-radius:8px;">
+          </div>
+          <div class="settings-btn-grid">
+            <button class="btn" id="btn-digest-view">오늘 요약 보기</button>
+            <button class="btn" id="btn-digest-send">지금 알림 보내기</button>
+          </div>
+        </div>
       </div>
-      <hr>
-      <div class="row-flex">
-        <button class="btn danger" id="btn-logout">토큰 지우기</button>
-        <div class="spacer"></div>
-        <button class="btn" data-close>닫기</button>
+
+      <!-- 4. 텔레그램 연동 -->
+      <div class="settings-section">
+        <div class="settings-section-title">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          텔레그램 연동
+        </div>
+        <div class="settings-card">
+          <div id="tg-setup" style="padding:14px;">
+            <ol class="muted small tg-steps" style="margin:0 0 10px; padding-left:18px;">
+              <li>텔레그램에서 <b>@BotFather</b>를 찾아 <b>/newbot</b>을 보내고 이름을 정합니다.</li>
+              <li>BotFather가 주는 토큰을 아래에 붙여넣고 연결을 누릅니다.</li>
+            </ol>
+            <div class="row-flex">
+              <input id="tg-token" class="mono" placeholder="123456789:AAxxxxxxxx…" autocomplete="off" style="flex:1">
+              <button class="btn primary" id="btn-tg-connect">연결</button>
+            </div>
+          </div>
+          <div id="tg-linked" hidden>
+            <div class="settings-row">
+              <div class="settings-col">
+                <div class="settings-title">텔레그램 봇 연결 <span class="state-badge green">연결됨</span></div>
+                <div class="settings-desc" id="tg-bot" class="mono"></div>
+              </div>
+            </div>
+            <div style="padding:8px 14px 10px;">
+              <p class="muted small" id="tg-state" style="margin:0;"></p>
+            </div>
+            <div id="tg-pair" class="tg-pair" hidden style="margin:0 14px 10px;">
+              <span>내 봇에게 이 번호를 보내주세요</span>
+              <b id="tg-pair-code" class="mono"></b>
+            </div>
+            <div class="tg-mute" id="tg-mute" style="margin:0 14px 10px;">
+              <div class="kv"><span>알림 상태</span><b id="tg-mute-state">켜짐</b></div>
+              <div class="row-flex" id="tg-mute-opts">
+                <button class="chip" data-mute="60">1시간 끄기</button>
+                <button class="chip" data-mute="180">3시간 끄기</button>
+                <button class="chip" data-mute="">다시 켤 때까지</button>
+              </div>
+              <button class="btn" id="btn-tg-unmute" hidden>알림 다시 켜기</button>
+            </div>
+            <div class="settings-btn-grid">
+              <button class="btn" id="btn-tg-test">메시지 테스트</button>
+              <button class="btn danger" id="btn-tg-unlink">연결 끊기</button>
+            </div>
+          </div>
+        </div>
       </div>
+
+      <!-- 5. 편의 및 자동화 규칙 -->
+      <div class="settings-section">
+        <div class="settings-section-title">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          자동화 및 안전 규칙
+        </div>
+        <div class="settings-card">
+          <!-- 음성 읽어주기 -->
+          <div class="settings-row">
+            <div class="settings-col">
+              <div class="settings-title">완료 보고 음성 읽기 (TTS)</div>
+              <div class="settings-desc">작업이 끝나면 이동 중에도 들을 수 있게 소리 내어 읽어줍니다</div>
+            </div>
+            <label class="switch-control">
+              <input type="checkbox" id="tts-enabled">
+              <span class="switch-slider"></span>
+            </label>
+          </div>
+
+          <!-- 방해금지 시간 -->
+          <div class="settings-row">
+            <div class="settings-col">
+              <div class="settings-title">야간 방해금지 시간</div>
+              <div class="settings-desc" id="quiet-status">밤사이 알림을 모았다가 아침에 모아서 발송</div>
+            </div>
+            <label class="switch-control">
+              <input type="checkbox" id="quiet-enabled">
+              <span class="switch-slider"></span>
+            </label>
+          </div>
+          <div class="settings-row" style="background:rgba(255,255,255,0.02);">
+            <div class="settings-col">
+              <span style="font-size:12.5px; color:var(--ink-2);">방해금지 구간</span>
+            </div>
+            <div style="display:flex; align-items:center; gap:6px;">
+              <input type="time" id="quiet-start" class="time-input" aria-label="시작 시각" style="height:34px; border-radius:8px;">
+              <span class="muted small">~</span>
+              <input type="time" id="quiet-end" class="time-input" aria-label="끝 시각" style="height:34px; border-radius:8px;">
+            </div>
+          </div>
+
+          <!-- 자리 비웠을 때 -->
+          <div class="settings-row">
+            <div class="settings-col">
+              <div class="settings-title">자리 비움 시 자동 진행</div>
+              <div class="settings-desc">10분 미응답 시 재알림, 20분 후 안전한 요청만 자동 허용</div>
+            </div>
+            <span class="state-badge blue">안심 보호</span>
+          </div>
+
+          <!-- 자동 백업 -->
+          <div class="settings-row">
+            <div class="settings-col">
+              <div class="settings-title">대화 및 설정 자동 백업</div>
+              <div class="settings-desc" id="backup-status">확인 중…</div>
+            </div>
+            <button class="btn small" id="btn-backup-now" style="height:32px; font-size:12px;">지금 백업</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 하단 고정 푸터 -->
+    <div class="settings-footer">
+      <button class="btn danger" id="btn-logout">토큰 재설정</button>
+      <button class="btn primary" data-close>닫기</button>
     </div>
   </dialog>
 

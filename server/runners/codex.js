@@ -159,7 +159,11 @@ export function runCodex({ agent, workspace, text, cfg, hooks, opts = {} }) {
 }
 
 export function buildCodexArgs(entry, agent, workspace, text, opts = {}, cfg = null) {
-  const sandbox = opts.sandbox || (agent.permission_mode === 'ask' ? 'read-only' : 'workspace-write');
+  // ask → 읽기만, acceptEdits → 등록한 폴더 안만 수정, auto → 전체 허용(폴더 밖 파일·설치까지). 사용자가
+  // 담당자 설정에서 고른 값이다. Codex exec에는 폰 승인 같은 중간 물어보기가 없어서 막히면 그냥
+  // "권한 없음"으로 끝나기 때문에 단계가 필요하다.
+  const SANDBOX = { ask: 'read-only', acceptEdits: 'workspace-write', auto: 'danger-full-access' };
+  const sandbox = opts.sandbox || SANDBOX[agent.permission_mode] || 'workspace-write';
   // exec-level options must precede the `resume` subcommand. Putting -C/--sandbox
   // after `resume` makes current Codex CLIs reject the command before it starts.
   const args = [...entry.pre];
@@ -169,6 +173,8 @@ export function buildCodexArgs(entry, agent, workspace, text, opts = {}, cfg = n
   // SmartAgent supplies its own small, task-specific configuration. Skipping the desktop config
   // prevents unrelated personal plugins/MCP catalogs from being injected on every model call;
   // Codex authentication is explicitly preserved by this CLI flag.
+  // 폴더 안 수정 모드에서도 인터넷(패키지 설치·API 호출)은 막지 않는다.
+  if (sandbox === 'workspace-write') args.push('-c', 'sandbox_workspace_write.network_access=true');
   args.push('exec', '--ignore-user-config', '--json', '--skip-git-repo-check', '-C', workspace.path, '--sandbox', sandbox);
   if (agent.model) args.push('-m', agent.model);
   for (const image of opts.images || []) args.push('-i', image);

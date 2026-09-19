@@ -1,11 +1,11 @@
 // 담당자 오류를 대표가 읽을 수 있는 한 줄로 바꾸고, 잠깐 기다렸다 다시 하면 될 일인지 가려낸다.
 const RULES = [
   [/rate[_ -]?limit|too many requests|429/i, '요청이 너무 몰려 잠시 막혔습니다', true],
-  [/usage limit|quota|insufficient_quota|weekly limit|5-hour limit|한도.{0,8}(소진|초과|도달)/i, '구독 사용 한도에 닿았습니다. 한도가 풀리거나 다른 담당자로 바꿔야 합니다', false],
+  [/usage limit|quota|resource[_ ]exhausted|insufficient_quota|weekly limit|5-hour limit|한도.{0,8}(소진|초과|도달)/i, '구독 사용 한도에 닿았습니다. 한도가 풀리거나 다른 담당자로 바꿔야 합니다', false],
   [/overloaded|529|503|502|500|internal server error|service unavailable/i, 'AI 서버가 잠시 붐빕니다', true],
   [/ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|network|socket hang up|getaddrinfo/i, '인터넷 연결이 잠깐 끊겼습니다', true],
   [/timed? ?out|timeout/i, '응답이 너무 오래 걸려 끊었습니다', true],
-  [/authentication|unauthorized|401|invalid api key|not logged in|login/i, '로그인이 풀렸습니다. PC에서 Claude(또는 Codex)에 다시 로그인해야 합니다', false],
+  [/authentication|unauthorized|401|invalid api key|not logged in|login/i, '로그인이 풀렸습니다. Claude·Codex는 PC에서, Gemini는 앱 설정에서 다시 로그인해야 합니다', false],
   [/max[_ ]turns|error_max_turns/i, '허용된 단계 수를 다 써서 멈췄습니다', false],
   [/error_max_budget_usd|max budget/i, '정해 둔 예산을 다 써서 멈췄습니다', false],
   [/ENOENT.*claude|claude.*not found|spawn.*ENOENT/i, 'Claude 프로그램을 찾지 못했습니다. PC에 설치돼 있는지 확인이 필요합니다', false],

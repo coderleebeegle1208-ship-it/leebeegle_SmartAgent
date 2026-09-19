@@ -12,13 +12,16 @@ import { expireApprovals, setBlanketAllow } from '../approvals.js';
 import { createRunWatch, watchLimits, describeVerdict } from '../watchdog.js';
 import { runClaude, runClaudeOnce, runClaudeOnceText } from './claude.js';
 import { findCodexEntry, runCodex } from './codex.js';
+import { findGeminiEntry, runGemini } from './gemini.js';
+import { accountCredFiles as geminiCredFiles, accountEnv as geminiAccountEnv, accountHome as geminiAccountHome, hasAccounts as hasGeminiAccounts, listAccounts as listGeminiAccounts, pickAccount as pickGeminiAccount, forgetQuota as forgetGeminiQuota } from '../gemini-accounts.js';
 import { planPhase } from '../state.js';
-import { codexDefaults, modelLabel } from '../models.js';
+import { codexDefaults, geminiDefaults, geminiFallbackModel, geminiModelLabel, modelLabel } from '../models.js';
 import { gitDiff, gitSummary, snapshotTree, treeChanges } from '../git.js';
 import { buildReviewPrompt, buildRevisionPrompt, compactConversation, formatGitManifest, otherProvider } from '../collaboration.js';
-import { normalizeCodexUsage, summarizeRun, usageHeadline } from '../tokens.js';
+import { normalizeCodexUsage, normalizeGeminiUsage, summarizeRun, usageHeadline } from '../tokens.js';
 import { UPLOAD_DIR, attachmentBlock, extractLinks } from '../uploads.js';
 import { expandSkill, listSkills, resolveSkillCommand, skillCatalogBlock, skillPointerBlock, triageTextFor } from '../skills.js';
+import { readTranscript, transcriptPath, transcriptSize } from '../desktop-sessions.js';
 
 const live = new Map(); // agentId -> { child, cancelled }
 const usageAcc = new Map(); // agentId -> stage usage rows for the run in progress
@@ -29,9 +32,23 @@ const RETRY_DELAY_MS = 20_000;
 // 폰으로 바로 받아볼 만한 결과물. 코드·설정 파일은 제외.
 const DELIVERABLE_RE = /\.(mp4|mov|webm|mp3|wav|m4a|pdf|png|jpe?g|gif|webp|svg|html?|docx?|xlsx?|pptx?|csv|zip|srt|md|txt)$/i;
 const CONVO_ROLES = ['user', 'assistant', 'plan', 'handoff']; // the roles compactConversation actually reads
-const KIND_LABEL = { claude: 'Claude', codex: 'Codex' };
+const KIND_LABEL = { claude: 'Claude', codex: 'Codex', gemini: 'Gemini' };
+// 읽기 전용 턴(계획·검토): Codex는 샌드박스, Gemini는 승인 모드로 막는다. 각 실행기는 자기 것만 읽는다.
+const READ_ONLY = { sandbox: 'read-only', approvalMode: 'plan' };
 const STAGE_LABEL = { implement: '구현', review: '교차 리뷰', revise: '최종 수정' };
 const EFFORT_LABEL = { low: '낮음', medium: '중간', high: '높음', xhigh: '매우 높음', max: '최대' };
+
+/** 단일 모델 실행기(Codex·Gemini)의 실제 모델·강도. Claude는 pipeline에 따라 달라 여기 없다. */
+export function singleModelOf(agent, kind = agent.kind) {
+  if (kind === 'codex') return { kind, model: agent.codex_model || codexDefaults().model, effort: agent.codex_effort || codexDefaults().effort };
+  if (kind === 'gemini') return { kind, model: agent.gemini_model || geminiDefaults().model, effort: agent.gemini_effort || null };
+  return { kind: 'claude', model: agent.model, effort: agent.effort || null };
+}
+/** "Codex 5.6 Terra (강도 중간)" 같은 실행 담당 표시 이름. */
+function execLabelOf(agent) {
+  const m = singleModelOf(agent);
+  return `${KIND_LABEL[m.kind]} ${withEffort(m.model, m.effort)}`;
+}
 
 // Per-stage effort: the plan stage always gets at least 'high'; execution follows the CLI default unless set.
 export function stageEfforts(agent) {
@@ -80,6 +97,33 @@ function note(agentId, text) {
   const m = Messages.add(agentId, 'system', text);
   emit('message', { agent_id: agentId, message: m });
 }
+/** PC 클로드 앱과 같은 세션을 쓰는 담당자: 기록 파일에 새로 쌓인 PC 쪽 대화(내 말·답변 글)를 앱 화면으로 옮긴다. */
+export function syncDesktopTranscript(agentId) {
+  const agent = Agents.get(agentId);
+  if (!agent?.desktop_host_id || agent.kind !== 'claude' || !agent.session_id) return 0;
+  const workspace = Workspaces.get(agent.workspace_id);
+  if (!workspace) return 0;
+  const from = agent.transcript_pos || 0;
+  const { messages, pos } = readTranscript(transcriptPath(workspace.path, agent.session_id), from);
+  if (pos === from) return 0;
+  for (const m of messages) {
+    const row = Messages.add(agentId, m.role, m.content, { desktop: true }, m.ts);
+    emit('message', { agent_id: agentId, message: row });
+  }
+  const fields = { transcript_pos: pos };
+  const lastAnswer = [...messages].reverse().find((m) => m.role === 'assistant');
+  if (lastAnswer) fields.last_response = lastAnswer.content;
+  if (messages.length) update(agentId, fields); else Agents.update(agentId, fields);
+  return messages.length;
+}
+/** 이 앱이 직접 돌린 턴은 이미 화면에 있으므로, 기록 파일의 그 부분은 건너뛰도록 위치를 끝으로 옮긴다. */
+function skipOwnTranscript(agentId) {
+  const agent = Agents.get(agentId);
+  if (!agent?.desktop_host_id || agent.kind !== 'claude' || !agent.session_id) return;
+  const workspace = Workspaces.get(agent.workspace_id);
+  if (!workspace) return;
+  Agents.update(agentId, { transcript_pos: transcriptSize(transcriptPath(workspace.path, agent.session_id)) });
+}
 function pushUsage(agentId, row) {
   if (!usageAcc.has(agentId)) usageAcc.set(agentId, []);
   usageAcc.get(agentId).push(row);
@@ -116,9 +160,80 @@ export function claudeAddDirs(agentId, extra = []) {
   return [...(extra || []), dir];
 }
 
-/** Runs one Claude/Codex turn and resolves with the result summary when the process exits. */
-function runTurn(agentId, text, cfg, opts = {}) {
-  return new Promise((resolve) => {
+/** What the runner needs to run as this Google account: env for the login and, for a home account,
+ *  where its login files live so they can be copied into the run home. */
+function geminiRunAccount(acct) {
+  if (!acct) return null;
+  return { id: acct.id, env: geminiAccountEnv(acct.id), ...(acct.kind === 'home' ? { home: geminiAccountHome(acct.id), credFiles: geminiCredFiles(acct.id) } : {}) };
+}
+
+/** Gemini 대화는 로그인 계정에 묶여 있어 "계정id:대화id"로 저장한다. 다른 계정으로 돌면 이어 쓸 수 없다. */
+export function splitGeminiSession(saved) {
+  const m = String(saved || '').match(/^([a-z0-9]{1,16}):(.+)$/);
+  return m ? { accountId: m[1], sessionId: m[2] } : { accountId: null, sessionId: saved || null };
+}
+
+/** Pinned Gemini models this process has seen rejected (not enabled for the account / not rolled out
+ * yet) → the model we fell back to. Remembered for an hour so every turn doesn't pay a failed call. */
+const geminiModelFallbacks = new Map();
+const GEMINI_FALLBACK_TTL = 60 * 60 * 1000;
+function rememberedGeminiFallback(model) {
+  const hit = geminiModelFallbacks.get(model);
+  if (!hit) return null;
+  if (Date.now() - hit.at > GEMINI_FALLBACK_TTL) { geminiModelFallbacks.delete(model); return null; }
+  return hit.to;
+}
+/** "gemini-3.5-flash is not found / not supported / no access" style failures for a pinned model. */
+export function isModelUnavailableError(result) {
+  if (!result || result.ok || isUsageLimitError(result)) return false;
+  const text = [result.text, result.subtype, result.error].filter(Boolean).join(' ');
+  return /\bmodel\b.{0,80}(not found|not available|unavailable|not supported|unsupported|does not exist|is not (?:yet )?available|invalid|unknown|no access|not enabled|denied)|(not found|unavailable|invalid|unknown|unsupported).{0,40}\bmodel\b|\bNOT_FOUND\b|\bPERMISSION_DENIED\b|\b404\b/i.test(text);
+}
+
+/** Runs one Claude/Codex/Gemini turn and resolves with the result summary when the process exits.
+ * Gemini: 한도에 닿으면 다른 Google 계정으로 같은 지시를 이어서 한 번씩 더 시도하고, 고른 모델이
+ * 이 계정에서 안 열리면(아직 안 풀린 3.5 Flash 등) 같은 계열의 한 단계 아래 모델로 바꿔 다시 돈다. */
+async function runTurn(agentId, text, cfg, opts = {}) {
+  const provider = opts.kind || Agents.get(agentId)?.kind;
+  if (provider !== 'gemini') return runTurnOnce(agentId, text, cfg, opts);
+  const tried = [];
+  let prompt = text;
+  let model = Object.hasOwn(opts, 'model') ? opts.model : (Agents.get(agentId)?.gemini_model || geminiDefaults().model);
+  const remembered = rememberedGeminiFallback(model);
+  if (remembered) {
+    note(agentId, `Gemini ${geminiModelLabel(model)} 모델은 아직 이 계정에서 안 열려 ${geminiModelLabel(remembered)}로 진행`);
+    model = remembered;
+  }
+  let modelSwaps = 0;
+  for (;;) {
+    const r = await runTurnOnce(agentId, prompt, cfg, { ...opts, model, excludeAccounts: tried });
+    if (!r?.accountId || !Agents.get(agentId)) return r;
+    if (isUsageLimitError(r)) {
+      tried.push(r.accountId);
+      const next = await pickGeminiAccount(null, model, tried);
+      if (!next) return r;
+      forgetGeminiQuota(r.accountId);
+      const from = listGeminiAccounts().find((a) => a.id === r.accountId);
+      note(agentId, `Gemini 한도 감지 · ${from?.email || r.accountId} → ${next.email} 계정으로 이어서 시도`);
+      prompt = `이전 Google 계정의 Gemini 한도가 차서 다른 계정으로 전환되었습니다(대화 기억은 새로 시작). 현재 워크스페이스 상태를 먼저 확인하고, 이미 완료된 작업을 반복하거나 되돌리지 말고 아래 요청을 이어서 완료하세요.\n\n${text}`;
+      continue;
+    }
+    if (isModelUnavailableError(r) && modelSwaps < 3) {
+      const to = geminiFallbackModel(model);
+      if (!to) return r;
+      modelSwaps++;
+      geminiModelFallbacks.set(model, { to, at: Date.now() });
+      note(agentId, `Gemini ${geminiModelLabel(model)} 모델을 이 계정에서 쓸 수 없어 ${geminiModelLabel(to)}로 바꿔 다시 시도`);
+      model = to;
+      continue;
+    }
+    return r;
+  }
+}
+
+function runTurnOnce(agentId, text, cfg, opts = {}) {
+  return new Promise(async (resolve, reject) => {
+   try {
     const agent = Agents.get(agentId);
     if (!agent) throw new Error('agent not found');
     const workspace = Workspaces.get(agent.workspace_id);
@@ -134,7 +249,17 @@ function runTurn(agentId, text, cfg, opts = {}) {
     // Codex has no native SKILL.md discovery like Claude Code, so a brand-new thread gets a one-time
     // catalog to reach for on its own; the /이름 command path below never needs this (it inlines the
     // skill directly), so this only matters for requests that don't spell out a skill explicitly.
-    if (provider === 'codex' && !savedSession && !opts.fresh) {
+    // Gemini 계정 고르기: 고정 계정이 있으면 그것, 없으면 한도가 가장 많이 남은 계정. 저장된 세션이
+    // 다른 계정 것이면 이어 쓸 수 없으니 새 대화로 간다(계정 전환 안내는 runTurn이 붙인다).
+    let geminiAccount = null;
+    if (provider === 'gemini') {
+      const split = splitGeminiSession(savedSession);
+      const exclude = opts.excludeAccounts || [];
+      const preferred = exclude.length ? null : agent.gemini_account || split.accountId;
+      geminiAccount = await pickGeminiAccount(preferred, opts.model || agent.gemini_model, exclude);
+      savedSession = geminiAccount && split.accountId === geminiAccount.id ? split.sessionId : null;
+    }
+    if ((provider === 'codex' || provider === 'gemini') && !savedSession && !opts.fresh) {
       const catalog = skillCatalogBlock(listSkills(workspace.path));
       if (catalog) text = `${catalog}\n\n${text}`;
     }
@@ -143,10 +268,12 @@ function runTurn(agentId, text, cfg, opts = {}) {
       text = `[이전 대화 요약 · 이어서 진행]\n${agent.carry_note}\n\n${text}`;
       Agents.update(agentId, { carry_note: null });
     }
-    const codexDefault = provider === 'codex' ? codexDefaults() : null;
-    const runtimeModel = Object.hasOwn(opts, 'model') ? opts.model : provider === 'codex' ? agent.codex_model || codexDefault.model : agent.model;
-    const runtimeEffort = Object.hasOwn(opts, 'effort') ? opts.effort : provider === 'codex' ? agent.codex_effort || codexDefault.effort : agent.effort;
+    const single = singleModelOf(agent, provider);
+    const runtimeModel = Object.hasOwn(opts, 'model') ? opts.model : single.model;
+    const runtimeEffort = Object.hasOwn(opts, 'effort') ? opts.effort : provider === 'claude' ? agent.effort : single.effort;
     const runtimeAgent = { ...agent, kind: provider, session_id: savedSession, model: runtimeModel, effort: runtimeEffort };
+    // 저장할 때는 계정 접두어를 붙인다.
+    const storedSession = (id) => (provider === 'gemini' && geminiAccount ? `${geminiAccount.id}:${id}` : id);
     let result = null;
     let resolvedModel = null;
     let usageRow = null;
@@ -158,6 +285,7 @@ function runTurn(agentId, text, cfg, opts = {}) {
           recordResolvedModel(agentId, opts.stage, info.model);
         }
         if (!sessionId || opts.fresh) return;
+        sessionId = storedSession(sessionId);
         AgentSessions.upsert(agentId, provider, sessionId);
         const current = Agents.get(agentId);
         if (current?.kind === provider && sessionId !== current.session_id) update(agentId, { session_id: sessionId });
@@ -189,8 +317,10 @@ function runTurn(agentId, text, cfg, opts = {}) {
         stopAgent(agentId);
       },
       onResult: (r) => {
-        result = { ...r, provider, ...(opts.phase ? { phase: opts.phase } : {}) };
-        const usage = provider === 'codex' ? (r.usage ? normalizeCodexUsage(r.usage) : null) : r.usage;
+        result = { ...r, provider, ...(opts.phase ? { phase: opts.phase } : {}), ...(geminiAccount ? { accountId: geminiAccount.id } : {}) };
+        const usage = provider === 'codex' ? (r.usage ? normalizeCodexUsage(r.usage) : null)
+          : provider === 'gemini' ? (r.usage ? normalizeGeminiUsage(r.usage) : null)
+          : r.usage;
         const hasTokens = usage && (usage.input || usage.output || usage.cacheRead || usage.cacheWrite);
         if (hasTokens) {
           if (usageRow) {
@@ -223,8 +353,8 @@ function runTurn(agentId, text, cfg, opts = {}) {
           }
         }
         if (r.session_id && !opts.fresh && Agents.get(agentId)) {
-          AgentSessions.upsert(agentId, provider, r.session_id);
-          if (Agents.get(agentId)?.kind === provider) Agents.update(agentId, { session_id: r.session_id });
+          AgentSessions.upsert(agentId, provider, storedSession(r.session_id));
+          if (Agents.get(agentId)?.kind === provider) Agents.update(agentId, { session_id: storedSession(r.session_id) });
         }
       },
       onExit: ({ code, error, gotResult }) => {
@@ -238,7 +368,7 @@ function runTurn(agentId, text, cfg, opts = {}) {
         } else if (!gotResult && current) {
           const m = Messages.add(agentId, 'error', error || `종료 코드 ${code}`);
           emit('message', { agent_id: agentId, message: m });
-          result = { ok: false, text: error || `exit ${code}`, crashed: true, provider };
+          result = { ok: false, text: error || `exit ${code}`, crashed: true, provider, ...(geminiAccount ? { accountId: geminiAccount.id } : {}) };
         }
         emit('agent.exited', { agent_id: agentId, code });
         resolve(result);
@@ -251,8 +381,13 @@ function runTurn(agentId, text, cfg, opts = {}) {
     const claudeOpts = provider === 'claude' ? { ...opts, addDirs: claudeAddDirs(agentId, opts.addDirs) } : opts;
     const child = provider === 'codex'
       ? runCodex({ agent: runtimeAgent, workspace, text, cfg, hooks, opts })
-      : runClaude({ agent: runtimeAgent, workspace, text, cfg, hooks, opts: claudeOpts });
+      : provider === 'gemini'
+        ? runGemini({ agent: runtimeAgent, workspace, text, cfg, hooks, opts: { ...opts, accountId: geminiAccount?.id || null, account: geminiRunAccount(geminiAccount), includeDirs: claudeAddDirs(agentId, opts.addDirs) } })
+        : runClaude({ agent: runtimeAgent, workspace, text, cfg, hooks, opts: claudeOpts });
     if (child) live.set(agentId, { child, provider });
+   } catch (e) {
+    reject(e);
+   }
   });
 }
 
@@ -376,14 +511,12 @@ async function runPlanDebate(agentId, text, cfg, planner, planStartMessageId) {
   const agent = Agents.get(agentId);
   const plan = findPlanMessage(agentId, planStartMessageId);
   if (!agent || !plan) return {};
-  const reviewer = agent.kind === 'codex'
-    ? { kind: 'codex', model: agent.codex_model || codexDefaults().model, effort: agent.codex_effort || codexDefaults().effort }
-    : { kind: 'claude', model: agent.model, effort: agent.effort || null };
+  const reviewer = singleModelOf(agent);
   note(agentId, `계획 검토 · ${KIND_LABEL[reviewer.kind]} ${withEffort(reviewer.model, reviewer.effort)}가 초안을 읽고 의견을 내는 중…`);
   const reviewPrompt = planReviewPrompt(text, plan.content);
   const reviewRun = reviewer.kind === 'claude'
     ? await runTurn(agentId, reviewPrompt, cfg, { kind: 'claude', stage: 'plan', fresh: true, model: reviewer.model, effort: reviewer.effort, tools: ['Read', 'Glob', 'Grep'], permissionMode: 'dontAsk', disallowedTools: ['Write', 'Edit', 'NotebookEdit', 'Bash'], captureAs: 'plan_review', budgetUsd: cfg.planBudgetUsd || undefined })
-    : await runTurn(agentId, reviewPrompt, cfg, { kind: 'codex', stage: 'plan', fresh: true, model: reviewer.model, effort: reviewer.effort, sandbox: 'read-only', captureAs: 'plan_review' });
+    : await runTurn(agentId, reviewPrompt, cfg, { kind: reviewer.kind, stage: 'plan', fresh: true, model: reviewer.model, effort: reviewer.effort, ...READ_ONLY, captureAs: 'plan_review' });
   if (!Agents.get(agentId)) return { deleted: true };
   if (reviewRun?.stopped) return { failed: reviewRun };
   const reviewText = String(reviewRun?.text || '').trim();
@@ -440,9 +573,7 @@ async function runPlanDebate(agentId, text, cfg, planner, planStartMessageId) {
 async function runCrossPlan(agentId, text, cfg, extra = {}) {
   const agent = Agents.get(agentId);
   const planner = crossPlanner(agent);
-  const execLabel = agent.kind === 'codex'
-    ? `Codex ${withEffort(agent.codex_model || codexDefaults().model, agent.codex_effort || codexDefaults().effort)}`
-    : `Claude ${withEffort(agent.model, agent.effort)}`;
+  const execLabel = execLabelOf(agent);
   if (planner.kind === 'codex' && !findCodexEntry()) {
     note(agentId, `Codex CLI를 찾지 못해 계획 없이 ${execLabel} 바로 실행`);
     return { prompt: text, planStartMessageId: null };
@@ -486,7 +617,7 @@ async function runCrossPlan(agentId, text, cfg, extra = {}) {
 export function isUsageLimitError(result) {
   if (!result || result.ok) return false;
   const text = [result.text, result.subtype, result.error].filter(Boolean).join(' ').toLowerCase();
-  return /rate[_ -]?limit|usage limit|quota|too many requests|insufficient_quota|weekly limit|5-hour limit|한도.{0,8}(소진|초과|도달)|사용량.{0,8}(소진|초과|도달)/i.test(text);
+  return /rate[_ -]?limit|usage limit|quota|resource[_ ]exhausted|too many requests|insufficient_quota|weekly limit|5-hour limit|five hour limit|capacity[_ ]exhausted|out of (?:plan )?credits|한도.{0,8}(소진|초과|도달)|사용량.{0,8}(소진|초과|도달)/i.test(text);
 }
 
 /** Network blips, overloaded API, a crashed CLI: worth one automatic retry. */
@@ -537,7 +668,7 @@ async function completeOrFailover(agentId, result, originalText, cfg, allowFailo
   }
 
   const fromKind = result?.provider || agent.kind;
-  const toKind = fromKind === 'claude' ? 'codex' : 'claude';
+  const toKind = otherProvider(fromKind);
   if (toKind === 'codex' && !findCodexEntry()) return finish(agentId, result);
 
   activateProvider(agentId, fromKind, toKind);
@@ -607,7 +738,7 @@ async function runProviderWork(agentId, text, cfg, { kind, phase, autoRoute = fa
     });
   }
 
-  return runTurn(agentId, text, cfg, { kind, phase, ...(phase === 'review' ? { sandbox: 'read-only', fresh: true } : {}) });
+  return runTurn(agentId, text, cfg, { kind, phase, ...(phase === 'review' ? { ...READ_ONLY, fresh: true } : {}) });
 }
 
 async function runWorkWithLimitFallback(agentId, text, cfg, kind, phase, autoRoute, triageText = null, crossPlan = false) {
@@ -797,6 +928,8 @@ async function compactAgentInner(agentId, agent, history, cfg, reason) {
   AgentSessions.remove(agentId, agent.kind);
   const fields = { carry_note: memo, context_tokens: 0 };
   fields.session_id = null;
+  // 요약 뒤에는 새 세션이라 PC 클로드 앱의 기록과는 더 이상 같은 파일이 아니다.
+  if (agent.desktop_host_id) { fields.desktop_host_id = null; fields.transcript_pos = 0; note(agentId, 'PC 클로드 앱 대화 연동 해제 · 요약해서 새 대화로 넘어가면 PC 쪽과 따로 갑니다'); }
   update(agentId, fields);
   const m = Messages.add(agentId, 'handoff', `${COMPACT_LABEL} · 이어가기 메모\n${memo}`, { compact: true, reason });
   emit('message', { agent_id: agentId, message: m });
@@ -811,7 +944,7 @@ async function compactAgentInner(agentId, agent, history, cfg, reason) {
 function maybeAutoCompact(agentId, cfg) {
   const limit = Number(cfg?.compactAfterTokens) || 0;
   const agent = Agents.get(agentId);
-  if (!limit || !agent || agent.context_tokens < limit) return;
+  if (!limit || !agent || agent.desktop_host_id || agent.context_tokens < limit) return; // PC 연동 담당자는 자동 요약으로 세션을 갈아타지 않는다
   compactAgent(agentId, cfg, { reason: 'auto' }).catch((e) => note(agentId, `${COMPACT_LABEL} 실패 · ${e.message}`));
 }
 
@@ -820,7 +953,7 @@ function maybeAutoCompact(agentId, cfg) {
 async function precompactIfNeeded(agentId, cfg) {
   const limit = Number(cfg?.compactAfterTokens) || 0;
   const agent = Agents.get(agentId);
-  if (!limit || !agent || agent.context_tokens < limit) return;
+  if (!limit || !agent || agent.desktop_host_id || agent.context_tokens < limit) return; // PC 연동 담당자는 자동 요약으로 세션을 갈아타지 않는다
   try {
     await compactAgent(agentId, cfg, { reason: 'auto', skipStatusCheck: true });
   } catch (e) {
@@ -908,6 +1041,7 @@ function finish(agentId, r, opts = {}) {
   setBlanketAllow(agentId, false);
   runWatch.delete(agentId);
   snapshotAfter(agentId);
+  skipOwnTranscript(agentId);
   const agent = Agents.get(agentId);
   if (!agent) return;
   if (!r) return;
@@ -979,8 +1113,8 @@ export function steerQueued(agentId, qid) {
     drainQueue(agentId, lastCfg);
     return Agents.get(agentId);
   }
-  if (entry.provider !== 'codex' && typeof entry.child?.steer !== 'function') throw new Error('지금 단계에는 끼워 넣을 수 없습니다. 작업이 끝나면 이어서 시작합니다');
-  if (entry.provider === 'codex') throw new Error('Codex는 처리 중 끼워 넣기가 안 됩니다. 작업이 끝나면 이어서 시작합니다');
+  if (entry.provider !== 'claude') throw new Error(`${KIND_LABEL[entry.provider] || entry.provider}는 처리 중 끼워 넣기가 안 됩니다. 작업이 끝나면 이어서 시작합니다`);
+  if (typeof entry.child?.steer !== 'function') throw new Error('지금 단계에는 끼워 넣을 수 없습니다. 작업이 끝나면 이어서 시작합니다');
   let extra = {};
   try { extra = q.extra_json ? JSON.parse(q.extra_json) : {}; } catch {}
   const attachments = extra.attachments || [];
@@ -1013,12 +1147,14 @@ export function startPrompt(agentId, text, cfg, extra = {}) {
   if (compacting.has(agentId)) throw new Error('대화를 정리하는 중입니다. 잠시 후 다시 보내세요');
   const workspace = Workspaces.get(agent.workspace_id);
   if (!workspace) throw new Error('workspace not found');
-  if (agent.collab_mode && !findCodexEntry()) throw new Error('교차 협업에는 Codex CLI가 필요합니다');
+  if (agent.collab_mode && agent.kind === 'claude' && !findCodexEntry()) throw new Error('교차 협업에는 Codex CLI가 필요합니다');
 
   const attachments = extra.attachments || [];
   const links = extractLinks(text, extra.links || []);
   if (!text.trim() && !attachments.length && !links.length) throw new Error('내용이 없습니다');
 
+  // PC 클로드 앱에서 그사이 오간 대화가 있으면 먼저 화면에 옮겨 순서를 맞춘다.
+  syncDesktopTranscript(agentId);
   usageAcc.delete(agentId);
   // `/이름 인자` at the start of the message swaps in that skill's SKILL.md as the model text,
   // regardless of provider or pipeline stage — the CLIs' own native skill loading only ever
@@ -1061,9 +1197,7 @@ export function executePlan(agentId, cfg, side = 'planner') {
   const efforts = stageEfforts(agent);
   // 교차 모델(auto)만 계획·실행 모델이 따로 있다. 계획 분담(manual)은 에이전트의 단일 실행 모델이 맡는다.
   const autoExec = agent.kind === 'claude' && agent.pipeline === 'auto';
-  const execLabel = autoExec ? withEffort(agent.exec_model, efforts.exec)
-    : agent.kind === 'codex' ? `Codex ${withEffort(agent.codex_model || codexDefaults().model, agent.codex_effort || codexDefaults().effort)}`
-    : `Claude ${withEffort(agent.model, agent.effort)}`;
+  const execLabel = autoExec ? withEffort(agent.exec_model, efforts.exec) : execLabelOf(agent);
   const decision = dispute ? (side === 'reviewer' ? '검토 담당 안 선택' : '계획 담당 안 선택') : '계획 승인';
   note(agentId, `${decision} → ${execLabel} 실행`);
   const prompt = dispute && side === 'reviewer' ? execPromptReviewerSide(agentId) : execPrompt(agentId, 0);
@@ -1078,12 +1212,14 @@ export function executePlan(agentId, cfg, side = 'planner') {
 export function switchProvider(agentId, kind) {
   const agent = Agents.get(agentId);
   if (!agent) throw new Error('agent not found');
-  if (!['claude', 'codex'].includes(kind)) throw new Error('provider must be claude|codex');
+  if (!['claude', 'codex', 'gemini'].includes(kind)) throw new Error('provider must be claude|codex|gemini');
   if (live.has(agentId) || agent.status === 'working' || agent.status === 'needs_attention') {
     throw new Error('작업 또는 승인이 끝난 뒤 전환하세요');
   }
   if (agent.pending_plan) throw new Error('대기 중인 계획을 실행하거나 새 작업으로 초기화한 뒤 전환하세요');
   if (kind === 'codex' && !findCodexEntry()) throw new Error('Codex CLI를 찾지 못했습니다');
+  if (kind === 'gemini' && !findGeminiEntry()) throw new Error('Antigravity CLI(agy)를 찾지 못했습니다');
+  if (kind === 'gemini' && !hasGeminiAccounts()) throw new Error('설정에서 Google 계정을 먼저 연결하세요');
   if (kind === agent.kind) return agent;
 
   if (agent.session_id) AgentSessions.upsert(agentId, agent.kind, agent.session_id);

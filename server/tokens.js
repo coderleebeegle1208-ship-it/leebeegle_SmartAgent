@@ -26,6 +26,15 @@ export function normalizeCodexUsage(u) {
   return { input, output, cacheRead, cacheWrite: 0, cost: null };
 }
 
+/** Antigravity stream-json `result.usage` -> same shape. cache_read_tokens is the part of input_tokens served from cache. */
+export function normalizeGeminiUsage(u) {
+  u = u || {};
+  const cacheRead = u.cache_read_tokens || u.cached || 0;
+  const input = Math.max(0, (u.input_tokens || 0) - cacheRead);
+  const output = u.output_tokens || 0;
+  return { input, output, cacheRead, cacheWrite: 0, cost: null };
+}
+
 /** API-rate estimate for a usage row under a given model, or null if the model has no price row. */
 export function estimateCost(model, u) {
   const price = priceFor(model);

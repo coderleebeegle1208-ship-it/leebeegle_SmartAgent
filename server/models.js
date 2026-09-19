@@ -44,6 +44,114 @@ export const CODEX_MODEL_CATALOG = [
   { value: 'gpt-5.5', label: '5.5' },
 ];
 
+// Gemini via the Antigravity CLI (agy). agy names its models as "<family>-<thinking level>" slugs
+// (gemini-3.8-flash-high, gemini-3.1-pro-low, claude-sonnet-4-6 …). The phone picks a family and an
+// effort; geminiSlug() turns that into the slug agy accepts. The hand-written floor is today's
+// `agy models` output; gemini-models.js re-reads that command when agy updates so a newer Pro/Flash
+// shows up without a code change. Claude/GPT entries come through the same Google subscription.
+const GEMINI_ALIASES = [
+  { value: 'auto', label: '자동 (최신 Flash)' },
+];
+const GEMINI_BASE_SLUGS = [
+  ['gemini-3.8-flash-high', 'Gemini 3.8 Flash (High)'], ['gemini-3.8-flash-medium', 'Gemini 3.8 Flash (Medium)'], ['gemini-3.8-flash-low', 'Gemini 3.8 Flash (Low)'],
+  ['gemini-3.7-flash-high', 'Gemini 3.7 Flash (High)'], ['gemini-3.7-flash-medium', 'Gemini 3.7 Flash (Medium)'], ['gemini-3.7-flash-low', 'Gemini 3.7 Flash (Low)'],
+  ['gemini-3.6-flash-high', 'Gemini 3.6 Flash (High)'], ['gemini-3.6-flash-medium', 'Gemini 3.6 Flash (Medium)'], ['gemini-3.6-flash-low', 'Gemini 3.6 Flash (Low)'],
+  ['gemini-3.1-pro-high', 'Gemini 3.1 Pro (High)'], ['gemini-3.1-pro-low', 'Gemini 3.1 Pro (Low)'],
+  ['claude-sonnet-4-6', 'Claude Sonnet 4.6 (Thinking)'], ['claude-opus-4-6-thinking', 'Claude Opus 4.6 (Thinking)'],
+  ['gpt-oss-120b-medium', 'GPT-OSS 120B (Medium)'],
+];
+let geminiFamilies = []; // [{ id, label, gemini, levels: { low?: slug, medium?: slug, high?: slug }, slug }]
+
+/** gemini-3.1-pro-high → { version: 3.1, gen: 3, tier: 'Pro', tierRank: 0, level: 'high', base: 'gemini-3.1-pro' } (null for others). */
+export function parseGeminiModel(value) {
+  const m = String(value || '').match(/^gemini-(\d+(?:\.\d+)?)-(pro|flash-lite|flash)(?:-preview)?(?:-(low|medium|high))?$/);
+  if (!m) return null;
+  const tier = m[2] === 'pro' ? 'Pro' : m[2] === 'flash' ? 'Flash' : 'Flash Lite';
+  return { version: parseFloat(m[1]), gen: Math.floor(parseFloat(m[1])), tier, tierRank: ['Pro', 'Flash', 'Flash Lite'].indexOf(tier), level: m[3] || null, base: `gemini-${m[1]}-${m[2]}`, preview: /-preview/.test(value) };
+}
+/** Newest generation first; inside a generation Pro → Flash → Flash Lite, each newest first. Non-Gemini last, in agy's order. */
+function geminiOrder(a, b) {
+  const pa = parseGeminiModel(a.id), pb = parseGeminiModel(b.id);
+  if (pa && pb) return (pb.gen - pa.gen) || (pa.tierRank - pb.tierRank) || (pb.version - pa.version);
+  if (pa) return -1;
+  if (pb) return 1;
+  return 0;
+}
+/** "Gemini 3.8 Flash (High)" → "3.8 Flash"; "Claude Sonnet 4.6 (Thinking)" → "Claude Sonnet 4.6". */
+function cleanLabel(label, id) {
+  const p = parseGeminiModel(id);
+  if (p) return `${p.version} ${p.tier}`;
+  return String(label || id).replace(/\s*\((?:low|medium|high|thinking)\)\s*$/i, '').trim() || id;
+}
+/** Merge `agy models` rows ([[slug, label], …]) into families the phone can pick from. Empty input → the floor. */
+export function registerGeminiModels(rows) {
+  const source = rows?.length ? rows : GEMINI_BASE_SLUGS;
+  const byId = new Map();
+  for (const row of source) {
+    const [slug, label] = Array.isArray(row) ? row : [row, null];
+    if (!slug || typeof slug !== 'string' || /\s/.test(slug)) continue;
+    const p = parseGeminiModel(slug);
+    const m = p ? null : slug.match(/^(.*)-(low|medium|high)$/);
+    const id = p ? p.base : m ? m[1] : slug;
+    const level = p ? p.level : m ? m[2] : null;
+    const fam = byId.get(id) || { id, label: cleanLabel(label, id), gemini: !!p, levels: {}, slug: null };
+    if (level) fam.levels[level] = slug; else fam.slug = slug;
+    byId.set(id, fam);
+  }
+  geminiFamilies = [...byId.values()].sort(geminiOrder);
+  return geminiFamilies.map((f) => f.id);
+}
+registerGeminiModels(GEMINI_BASE_SLUGS);
+
+export function geminiModelCatalog() {
+  return [...GEMINI_ALIASES, ...geminiFamilies.map((f) => ({ value: f.id, label: geminiModelLabel(f.id) }))];
+}
+// agy takes low / medium / high (Pro ships only high and low; medium rounds up).
+export const GEMINI_EFFORTS = ['low', 'medium', 'high'];
+
+function familyOf(value) {
+  return geminiFamilies.find((f) => f.id === value || f.slug === value || Object.values(f.levels).includes(value)) || null;
+}
+export function isGeminiModelAllowed(value) {
+  return GEMINI_ALIASES.some((o) => o.value === value) || geminiFamilies.some((f) => f.id === value);
+}
+export function geminiModelLabel(value) {
+  const alias = GEMINI_ALIASES.find((o) => o.value === value);
+  if (alias) return alias.label;
+  const fam = familyOf(value);
+  if (fam) return fam.gemini ? fam.label : `${fam.label} (Google)`;
+  const p = parseGeminiModel(value);
+  return p ? `${p.version} ${p.tier}` : value || '기본 모델';
+}
+/** The newest Gemini Flash family — what "auto" means. */
+export function geminiNewestFlash() {
+  return geminiFamilies.find((f) => f.gemini && parseGeminiModel(f.id).tier === 'Flash') || geminiFamilies.find((f) => f.gemini) || geminiFamilies[0] || null;
+}
+/** Family + effort → { model: slug for --model, effort: value for --effort or null }.
+ *  Missing levels fall to the nearest one (medium → high → low, low → medium → high, high → medium → low). */
+export function geminiSlug(value, effort) {
+  const fam = !value || value === 'auto' ? geminiNewestFlash() : familyOf(value);
+  if (!fam) return { model: value && value !== 'auto' ? value : null, effort: effort || null };
+  const levels = Object.keys(fam.levels);
+  if (!levels.length) return { model: fam.slug || fam.id, effort: effort || null };
+  const wish = effort || 'medium';
+  const order = { medium: ['medium', 'high', 'low'], low: ['low', 'medium', 'high'], high: ['high', 'medium', 'low'] }[wish] || ['medium', 'high', 'low'];
+  const level = order.find((l) => fam.levels[l]);
+  return { model: fam.levels[level], effort: null };
+}
+/** The next older family of the same tier (3.8 Flash → 3.7 Flash → 3.6 Flash), or "auto" when none is left.
+ * Used when a pinned model turns out not to be enabled for the account. */
+export function geminiFallbackModel(value) {
+  const p = parseGeminiModel(value);
+  if (!p) return value === 'auto' ? null : 'auto';
+  const older = geminiFamilies.filter((f) => { const q = parseGeminiModel(f.id); return q && q.tier === p.tier && q.version < p.version; });
+  return older[0]?.id || 'auto';
+}
+/** Auto (newest Flash) is the balanced default; pinning Pro is one tap away in the composer. */
+export function geminiDefaults() {
+  return { model: 'auto', effort: null };
+}
+
 export function isCodexModelAllowed(value) {
   return CODEX_MODEL_CATALOG.some((o) => o.value === value);
 }
@@ -66,6 +174,9 @@ export function isModelAllowed(stage, value) {
 export function modelLabel(value) {
   const codex = CODEX_MODEL_CATALOG.find((o) => o.value === value);
   if (codex) return codex.label;
+  if (value === 'auto') return 'Gemini 자동';
+  if (parseGeminiModel(value)) return `Gemini ${geminiModelLabel(value)}`;
+  if (/^gemini-/.test(String(value))) return String(value).replace(/^gemini-/, 'Gemini ').replace('-preview', '');
   if (!value) return '기본 모델';
   for (const f of MODEL_FAMILIES) {
     if (f.alias === value) return `${f.name} 최신`;
@@ -77,6 +188,8 @@ export function modelLabel(value) {
     const fam = MODEL_FAMILIES.find((f) => f.alias === m[1]);
     return `${fam ? fam.name : m[1]} ${m[2]}${m[3] ? `.${m[3]}` : ''}`;
   }
+  // Claude/GPT models agy serves through the Google subscription.
+  if (familyOf(value)) return geminiModelLabel(value);
   return String(value);
 }
 

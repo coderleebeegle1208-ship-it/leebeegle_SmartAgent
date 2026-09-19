@@ -176,6 +176,31 @@ export function getJob(id) {
   return jobs.get(id) || null;
 }
 
+function killTree(pid) {
+  if (!pid) return;
+  try {
+    if (process.platform === 'win32') spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true }).unref();
+    else process.kill(-pid, 'SIGTERM');
+  } catch {}
+}
+
+/** 중지 버튼: 이 담당자의 배경 작업을 모두 끊는다. 프로세스를 끝내고 목록에서 지우되, 후속 지시(재시도)는 넣지 않는다. */
+export function cancelJobs(agentId) {
+  let n = 0;
+  for (const job of [...jobs.values()]) {
+    if (job.agent_id !== agentId) continue;
+    jobs.delete(job.id);
+    children.delete(job.id);
+    killTree(job.pid);
+    attempts.delete(`${agentId}:${labelKey(job.label)}`);
+    const m = Messages.add(agentId, 'system', `배경 작업 중지 · ${job.label}`, { job: job.id, outcome: 'cancelled' });
+    emit('message', { agent_id: agentId, message: m });
+    n++;
+  }
+  if (n) { persist(); emit('jobs.changed', { agent_id: agentId, jobs: jobsForAgent(agentId) }); }
+  return n;
+}
+
 function tailOf(job) {
   try { return readTail(job.log_file).text.trim(); } catch { return ''; }
 }

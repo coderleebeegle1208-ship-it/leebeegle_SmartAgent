@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
 CREATE TABLE IF NOT EXISTS agents (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  kind TEXT NOT NULL,                -- 'claude' | 'codex'
+  kind TEXT NOT NULL,                -- 'claude' | 'codex' | 'gemini'
   name TEXT NOT NULL,
   session_id TEXT,                   -- claude session id / codex thread id
   status TEXT NOT NULL DEFAULT 'idle', -- idle | working | needs_attention | done | error
@@ -129,6 +129,11 @@ for (const [table, col, def] of [
   ['agents', 'plan_dispute', 'INTEGER NOT NULL DEFAULT 0'],    // 합의 실패: 대표가 계획 담당 안·검토 담당 안 중 고를 때까지 대기
   ['approvals', 'risk', 'TEXT'],                              // 'outside' → 작업 폴더 밖 변경, 묶음 허용에서 제외
   ['approvals', 'level', 'TEXT'],                             // safe | caution | danger → 카드 색깔
+  ['agents', 'gemini_model', 'TEXT'],                         // Gemini 단일 모델 (null → 기본 'auto')
+  ['agents', 'gemini_effort', 'TEXT'],                        // low | medium | high (null → CLI 기본)
+  ['agents', 'gemini_account', 'TEXT'],                       // 고정할 Google 계정 id (null → 한도가 가장 많이 남은 계정)
+  ['agents', 'desktop_host_id', 'TEXT'],                     // PC 클로드 앱 대화와 같은 세션을 쓰는 담당자: 그 대화의 local_* id
+  ['agents', 'transcript_pos', 'INTEGER NOT NULL DEFAULT 0'], // 기록 파일(.jsonl)에서 여기까지 화면에 옮겼다는 바이트 위치
 ]) {
   const has = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
   if (has) continue;
@@ -183,9 +188,9 @@ export const Messages = {
       `SELECT * FROM (SELECT * FROM messages WHERE agent_id = ? AND role IN (${placeholders}) ORDER BY id DESC LIMIT ?) ORDER BY id`
     ).all(aid, ...roles, limit);
   },
-  add: (agent_id, role, content, meta) => {
+  add: (agent_id, role, content, meta, at) => {
     const r = db.prepare('INSERT INTO messages (agent_id, role, content, meta, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run(agent_id, role, content, meta ? JSON.stringify(meta) : null, now());
+      .run(agent_id, role, content, meta ? JSON.stringify(meta) : null, at || now());
     return db.prepare('SELECT * FROM messages WHERE id = ?').get(Number(r.lastInsertRowid));
   },
   clear: (aid) => db.prepare('DELETE FROM messages WHERE agent_id = ?').run(aid),

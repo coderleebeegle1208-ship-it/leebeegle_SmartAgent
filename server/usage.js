@@ -1,12 +1,14 @@
-// Subscription usage limits for Claude and Codex.
+// Subscription usage limits for Claude, Codex and Gemini.
 import { execFile, spawn } from 'node:child_process';
 import readline from 'node:readline';
 import { findClaudeBin, cleanClaudeEnv } from './runners/claude.js';
 import { findCodexEntry } from './runners/codex.js';
+import { geminiUsage } from './gemini-accounts.js';
 
 const caches = {
   claude: { at: 0, data: null, promise: null },
   codex: { at: 0, data: null, promise: null },
+  gemini: { at: 0, data: null, promise: null },
 };
 const TTL = 2 * 60 * 1000;
 
@@ -145,12 +147,13 @@ function fetchCodexUsage() {
 }
 
 export async function getUsage(provider = 'claude', force = false) {
-  const kind = provider === 'codex' ? 'codex' : 'claude';
+  const kind = provider === 'codex' ? 'codex' : provider === 'gemini' ? 'gemini' : 'claude';
   const cache = caches[kind];
   const fresh = cache.data && Date.now() - cache.at < TTL;
   if (fresh && !force) return cache.data;
   if (!cache.promise) {
-    const fetcher = kind === 'codex' ? fetchCodexUsage : fetchClaudeUsage;
+    // Gemini keeps its own per-account cache; the entry here only dedupes concurrent calls.
+    const fetcher = kind === 'codex' ? fetchCodexUsage : kind === 'gemini' ? () => geminiUsage(force) : fetchClaudeUsage;
     cache.promise = fetcher().then((data) => {
       if (data.ok) { cache.data = data; cache.at = Date.now(); }
       cache.promise = null;

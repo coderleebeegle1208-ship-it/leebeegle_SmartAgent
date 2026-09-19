@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>현재 설정 화면 (Before)</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Noto+Sans+KR:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../../public/style.css">
+  <style>
+    body {
+      margin: 0;
+      padding: 16px;
+      background: #0b0f17;
+      display: flex;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Noto Sans KR", sans-serif;
+    }
+    dialog[open] {
+      position: static;
+      display: block;
+      width: 100%;
+      max-width: 480px;
+      margin: 0 auto;
+    }
+  </style>
+</head>
+<body>
+  <dialog id="dlg-settings" open>
+    <div class="form">
+      <h2>설정</h2>
+      <div class="kv"><span>서버</span><span id="set-host" class="mono">leebeegle</span></div>
+      <div class="kv"><span>Claude</span><span id="set-claude" class="mono small">C:\Users\leebe\AppData\Roaming\npm...</span></div>
+      <div class="kv"><span>Codex</span><span id="set-codex" class="mono">설치됨</span></div>
+      <div class="kv"><span>Gemini</span><span id="set-gemini" class="mono">설치됨</span></div>
+      <hr>
+      <h3>Gemini · Google 계정</h3>
+      <p class="muted small">Gemini는 Google의 Antigravity 프로그램으로 돌고, Google AI Pro/Ultra 구독 한도를 씁니다. PC에서 로그인한 계정은 자동으로 잡히고, "계정 추가"로 구독 계정을 더 연결하면 담당자가 한도가 많이 남은 계정을 골라 쓰고 한도가 차면 다음 계정으로 넘어갑니다.</p>
+      <div id="gemini-accounts">
+        <div class="gacct">
+          <div class="gacct-head">
+            <div>
+              <b>coder.leebeegle1208@gmail.com</b>
+              <small>PC 로그인 · 가장 많이 쓴 항목 19%</small>
+            </div>
+            <button class="btn small" type="button">해제</button>
+          </div>
+          <div class="gacct-rows">
+            <span class="gq">Gemini 주간 <b>3%</b></span>
+            <span class="gq">Gemini 5시간 <b>19%</b></span>
+            <span class="gq">Claude·GPT 주간 <b>0%</b></span>
+            <span class="gq">Claude·GPT 5시간 <b>0%</b></span>
+          </div>
+        </div>
+      </div>
+      <div class="row-flex">
+        <button class="btn" type="button" id="gemini-add">계정 추가</button>
+        <button class="btn" type="button" id="gemini-refresh">한도 새로고침</button>
+      </div>
+      <hr>
+      <h3>알림</h3>
+      <p class="muted small">홈 화면에 설치한 뒤 켜면 승인 요청·완료 알림이 폰으로 옵니다.</p>
+      <div class="row-flex">
+        <button class="btn primary" id="btn-push">푸시 알림 켜기</button>
+        <button class="btn" id="btn-push-test">테스트</button>
+      </div>
+      <p class="muted small" id="push-status">이 기기에서 푸시가 켜져 있습니다.</p>
+      <hr>
+      <h3>오늘 한 일 요약</h3>
+      <p class="muted small">매일 정한 시각에 에이전트별로 무엇을 했고 얼마나 썼는지 한 장으로 알려드립니다.</p>
+      <div class="row-flex">
+        <label class="check" style="flex:1"><input type="checkbox" id="digest-enabled" checked> 매일 알림</label>
+        <input type="time" id="digest-time" class="time-input" value="21:00" aria-label="요약 알림 시각">
+      </div>
+      <div class="row-flex">
+        <button class="btn" id="btn-digest-view">오늘 요약 보기</button>
+        <button class="btn" id="btn-digest-send">지금 알림 보내기</button>
+      </div>
+      <hr>
+      <h3>방해금지 시간</h3>
+      <p class="muted small">이 시간에는 폰 알림을 참았다가, 끝나는 시각에 "밤사이 보고 N건" 한 장으로 모아서 보냅니다. 안전한 승인 요청은 자리 비움 규칙대로 알아서 진행되고, 위험한 요청은 아침에 보고 결정하면 됩니다.</p>
+      <div class="row-flex">
+        <label class="check" style="flex:1"><input type="checkbox" id="quiet-enabled"> 알림 참기</label>
+        <input type="time" id="quiet-start" class="time-input" value="23:00" aria-label="시작 시각">
+        <span class="muted small">~</span>
+        <input type="time" id="quiet-end" class="time-input" value="08:00" aria-label="끝 시각">
+      </div>
+      <p class="muted small" id="quiet-status"></p>
+      <hr>
+      <h3>텔레그램으로 받기</h3>
+      <p class="muted small">앱을 열지 않아도 승인 요청과 완료 보고가 텔레그램으로 오고, 버튼으로 바로 허용·거부하거나 답장으로 새 지시를 보낼 수 있습니다.</p>
+      <div id="tg-linked">
+        <div class="kv"><span>봇</span><span id="tg-bot" class="mono">@leebeegle_SmartAgent_bot</span></div>
+        <p class="muted small" id="tg-state">연결됨 · 승인 요청과 완료 보고가 텔레그램으로도 갑니다. 답장을 보내면 지시로 전달됩니다.</p>
+        <div class="tg-mute" id="tg-mute">
+          <div class="kv"><span>알림</span><b id="tg-mute-state">켜짐</b></div>
+          <div class="row-flex" id="tg-mute-opts">
+            <button class="chip">1시간 끄기</button>
+            <button class="chip">3시간 끄기</button>
+            <button class="chip">다시 켤 때까지</button>
+          </div>
+        </div>
+        <div class="row-flex">
+          <button class="btn" id="btn-tg-test">테스트</button>
+          <div class="spacer"></div>
+          <button class="btn danger" id="btn-tg-unlink">연결 끊기</button>
+        </div>
+      </div>
+      <hr>
+      <h3>보고 읽어주기</h3>
+      <p class="muted small">작업이 끝나면 완료 보고를 폰이 소리 내어 읽어줍니다. 이동 중에 화면을 보지 않아도 됩니다. 말풍선의 스피커 버튼으로 골라 들을 수도 있습니다.</p>
+      <label class="check"><input type="checkbox" id="tts-enabled"> 완료 보고 자동으로 읽어주기</label>
+      <hr>
+      <h3>자리 비웠을 때</h3>
+      <p class="muted small">승인 요청에 10분간 답이 없으면 한 번 더 알리고, 20분이 지나면 안전한 요청(읽기·작업 폴더 안 편집)만 자동으로 허용해 일이 멈춰 있지 않게 합니다. 작업 폴더 밖 변경이나 질문은 끝까지 기다립니다.</p>
+      <hr>
+      <h3>자동 백업</h3>
+      <p class="muted small">대화 기록과 설정을 매일 한 번 복사해 두고 최근 14일치를 보관합니다. PC가 켜져 있으면 그날 자동으로 됩니다.</p>
+      <div class="row-flex">
+        <span class="muted small" id="backup-status" style="flex:1">최근 백업: 오늘 04:00</span>
+        <button class="btn" id="btn-backup-now">지금 백업</button>
+      </div>
+      <hr>
+      <div class="row-flex">
+        <button class="btn danger" id="btn-logout">토큰 지우기</button>
+        <div class="spacer"></div>
+        <button class="btn" data-close>닫기</button>
+      </div>
+    </div>
+  </dialog>
+</body>
+</html>
