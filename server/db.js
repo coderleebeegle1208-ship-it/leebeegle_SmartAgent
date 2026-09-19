@@ -134,6 +134,7 @@ for (const [table, col, def] of [
   ['agents', 'gemini_account', 'TEXT'],                       // 고정할 Google 계정 id (null → 한도가 가장 많이 남은 계정)
   ['agents', 'desktop_host_id', 'TEXT'],                     // PC 클로드 앱 대화와 같은 세션을 쓰는 담당자: 그 대화의 local_* id
   ['agents', 'transcript_pos', 'INTEGER NOT NULL DEFAULT 0'], // 기록 파일(.jsonl)에서 여기까지 화면에 옮겼다는 바이트 위치
+  ['agents', 'context_window', 'INTEGER'],                    // 마지막 턴 모델의 문맥 창 크기(토큰). PC 앱의 "컨텍스트 윈도우" 표시용
 ]) {
   const has = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
   if (has) continue;

@@ -403,17 +403,10 @@ api.patch('/agents/:id', (req, res) => {
   const modelChanged = current.session_id && modelFields.some((f) => f in fields && fields[f] !== current[f]);
   const a = Agents.update(id, fields);
   if (req.body?.clear_messages) Messages.clear(id);
-  if (modelChanged && current.desktop_host_id) {
-    // PC 클로드 앱과 같은 기록을 쓰는 대화는 요약으로 세션을 갈아타면 연동이 끊긴다. PC 앱이 그러듯 같은 대화에서 모델만 바꾼다.
-    const m = Messages.add(id, 'system', '실행 모델이 바뀌었습니다. PC 클로드 앱과 같은 대화라 요약하지 않고 그대로 이어갑니다(다음 지시 한 번은 대화를 새 모델에 다시 기억시켜 비용이 더 듭니다).');
+  if (modelChanged) {
+    // PC 클로드 앱처럼 같은 대화에서 모델만 바꾼다(요약해서 새 세션으로 갈아타지 않는다).
+    const m = Messages.add(id, 'system', '실행 모델이 바뀌었습니다. PC 앱처럼 같은 대화에서 이어갑니다(다음 지시 한 번은 대화를 새 모델에 다시 기억시켜 비용이 더 듭니다).');
     emit('message', { agent_id: id, message: m });
-  } else if (modelChanged) {
-    // Summarize into a memo instead of resuming: the alternative is re-writing the whole
-    // conversation into the new model's cache on the next turn, which costs far more.
-    compactAgent(id, cfg, { reason: 'model-change' }).catch(() => {
-      const m = Messages.add(id, 'system', '실행 모델이 바뀌어 다음 지시는 대화를 새 모델에 다시 기억시킵니다(한 번만 비용이 더 듭니다).');
-      emit('message', { agent_id: id, message: m });
-    });
   }
   emit('agent.updated', { agent: agentView(a) });
   res.json(agentView(a));

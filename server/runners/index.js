@@ -370,7 +370,7 @@ function runTurnOnce(agentId, text, cfg, opts = {}) {
             const contextTokens = provider === 'claude'
               ? r.contextTokens ?? ((usageRow.input || 0) + (usageRow.cacheRead || 0) + (usageRow.cacheWrite || 0))
               : (usageRow.input || 0) + (usageRow.cacheRead || 0);
-            Agents.update(agentId, { context_tokens: contextTokens });
+            Agents.update(agentId, { context_tokens: contextTokens, ...(r.contextWindow ? { context_window: r.contextWindow } : {}) });
           }
         }
         if (r.session_id && !opts.fresh && Agents.get(agentId)) {

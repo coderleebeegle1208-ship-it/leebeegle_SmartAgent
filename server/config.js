@@ -52,6 +52,14 @@ export function loadConfig() {
     cfg.tokenOptimizationVersion = 3;
     changed = true;
   }
+  if (cfg.tokenOptimizationVersion === 3) {
+    // v4: PC 클로드 앱과 똑같이. 앱이 요약 메모를 남기고 새 세션으로 갈아타는 자동 정리는 끄고,
+    // Claude CLI가 문맥 창 한도에 가까워질 때 스스로 하는 압축(같은 세션 유지)에 맡긴다.
+    // 수동 "대화 정리" 버튼은 그대로 남는다.
+    cfg.compactAfterTokens = 0;
+    cfg.tokenOptimizationVersion = 4;
+    changed = true;
+  }
   if (cfg.approvalRemindMin === undefined) {
     cfg.approvalRemindMin = 10; // 승인 요청에 답이 없으면 이 시간 뒤 한 번 더 알림 (0 = 끔)
     cfg.approvalAutoMin = 20;   // 그래도 없으면 안전한 요청(읽기·작업 폴더 안 편집)만 자동 허용 (0 = 끔)

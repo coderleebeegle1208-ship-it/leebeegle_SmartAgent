@@ -246,6 +246,9 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
         hooks.onSession?.(ev.session_id, { model: ev.model });
       } else if (ev.subtype === 'permission_denied') {
         hooks.onMessage?.('system', `권한 거부됨: ${ev.tool_name || ''}`);
+      } else if (ev.subtype === 'compact_boundary') {
+        // CLI가 문맥 창 한도에 가까워져 같은 대화 안에서 스스로 압축했다(PC 앱과 같은 동작).
+        hooks.onMessage?.('system', '대화가 길어져 PC 앱처럼 자동으로 압축했습니다 · 같은 대화로 이어갑니다');
       } else if (ev.subtype === 'api_retry') {
         hooks.onMessage?.('system', `API 재시도 ${ev.attempt}/${ev.max_retries} (${ev.error || ''})`);
       }
@@ -296,6 +299,7 @@ export function runClaude({ agent, workspace, text, cfg, hooks, opts = {} }) {
         // modelUsage also lists subagent models (Explore helpers run on Haiku); the main model is
         // the one that spent the most, not whichever key happens to come first.
         model: Object.entries(ev.modelUsage || {}).sort((a, b) => (b[1]?.costUSD || 0) - (a[1]?.costUSD || 0))[0]?.[0] || null,
+        contextWindow: Object.values(ev.modelUsage || {}).sort((a, b) => (b?.costUSD || 0) - (a?.costUSD || 0))[0]?.contextWindow || null,
       });
     }
   }

@@ -802,7 +802,18 @@
   function memoryUsageHTML() {
     const agent = state.detail?.agent;
     const limit = agent?.compact_limit;
-    if (!agent || !limit) return '';
+    if (!agent) return '';
+    if (!limit) {
+      // PC 앱과 같은 방식: 문맥 창 한도에 가까워지면 CLI가 같은 대화 안에서 스스로 압축한다.
+      const win = agent.context_window || 0;
+      const used = agent.context_tokens || 0;
+      if (!win && !used) return '';
+      const pct = win ? Math.min(100, Math.round((used / win) * 100)) : null;
+      return `<div class="usage-popover-row">
+        <div><strong>컨텍스트 윈도우</strong><small>${pct != null && pct >= 80 ? '한도가 가까워 곧 자동으로 압축됩니다' : '한도에 가까워지면 PC 앱처럼 자동으로 압축됩니다'}</small></div>
+        <b class="${pct != null && pct >= 80 ? 'hot' : ''}">${fmtTokens(used)}${win ? ` / ${fmtTokens(win)} (${pct}%)` : ''}</b>
+      </div>`;
+    }
     const used = agent.context_tokens || 0;
     const pct = Math.min(100, Math.round((used / limit) * 100));
     const hot = pct >= 80;

@@ -565,25 +565,19 @@ test('compactAfterTokens migration: v2-capped installs rise to 150k, 0 (off) and
   const configPath = process.env.AGENT_REMOTE_CONFIG;
   const write = (fields) => fs.writeFileSync(configPath, JSON.stringify(fields));
 
-  write({ tokenOptimizationVersion: 1, compactAfterTokens: 100_000 });
-  assert.equal(loadConfig().compactAfterTokens, 150_000, 'v1 → v2 cap → v3 triple');
-
-  write({ tokenOptimizationVersion: 2, compactAfterTokens: 50_000 });
-  assert.equal(loadConfig().compactAfterTokens, 150_000);
-
-  write({ tokenOptimizationVersion: 2, compactAfterTokens: 0 });
-  assert.equal(loadConfig().compactAfterTokens, 0);
-
-  write({ tokenOptimizationVersion: 2, compactAfterTokens: 30_000 });
-  assert.equal(loadConfig().compactAfterTokens, 30_000);
-
-  write({ tokenOptimizationVersion: 3, compactAfterTokens: 50_000 });
-  assert.equal(loadConfig().compactAfterTokens, 50_000, 'already on v3: an explicit 50k is a choice');
+  // v4: PC 앱과 같게 — 앱의 자동 정리는 끄고(0) CLI 압축에 맡긴다. 어느 버전에서 오든 0으로 모인다.
+  for (const prior of [{ tokenOptimizationVersion: 1, compactAfterTokens: 100_000 }, { tokenOptimizationVersion: 2, compactAfterTokens: 50_000 }, { tokenOptimizationVersion: 2, compactAfterTokens: 30_000 }, { tokenOptimizationVersion: 3, compactAfterTokens: 150_000 }, { tokenOptimizationVersion: 3, compactAfterTokens: 50_000 }]) {
+    write(prior);
+    assert.equal(loadConfig().compactAfterTokens, 0, JSON.stringify(prior));
+  }
+  // 이미 v4인 설치에서 직접 켠 값은 존중한다.
+  write({ tokenOptimizationVersion: 4, compactAfterTokens: 80_000 });
+  assert.equal(loadConfig().compactAfterTokens, 80_000, 'already on v4: an explicit value is a choice');
 
   fs.rmSync(configPath, { force: true });
   const fresh = loadConfig();
-  assert.equal(fresh.compactAfterTokens, 150_000);
-  assert.equal(fresh.tokenOptimizationVersion, 3);
+  assert.equal(fresh.compactAfterTokens, 0);
+  assert.equal(fresh.tokenOptimizationVersion, 4);
   assert.equal(fresh.planBudgetUsd, 0);
   assert.deepEqual([fresh.runAlertUsd, fresh.runStopUsd, fresh.loopRepeatLimit], [10, 30, 8]);
   assert.deepEqual([fresh.approvalRemindMin, fresh.approvalAutoMin], [10, 20]);
