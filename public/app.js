@@ -757,13 +757,13 @@
     const usage = providerUsage();
     if (!usage) return '<div class="usage-empty">사용량을 불러오는 중…</div>';
     if (!usage.ok && !usage.items?.length) return `<div class="usage-empty">사용량을 읽지 못했습니다${usage.error ? `<small>${esc(usage.error)}</small>` : ''}</div>`;
-    if (usage.provider === 'gemini') return geminiUsageHTML(usage) + memoryUsageHTML() + agentTokenUsageHTML();
+    if (usage.provider === 'gemini') return geminiUsageHTML(usage) + agentTokenUsageHTML() + memoryUsageHTML();
     const limits = usageSlots().map(([label, item]) => `
       <div class="usage-popover-row">
         <div><strong>${label}</strong><small>${item?.resets ? `리셋 ${esc(item.resets)}` : item ? '리셋 시각 정보 없음' : '별도 사용량 항목 없음'}</small></div>
         <b class="${item?.pct >= 90 ? 'hot' : item?.pct >= 70 ? 'warm' : ''}">${item ? `${item.pct}%` : '—'}</b>
       </div>`).join('');
-    return limits + memoryUsageHTML() + agentTokenUsageHTML();
+    return limits + agentTokenUsageHTML() + memoryUsageHTML();
   }
   // Gemini: 계정마다 한 묶음. 남은 비율이 아니라 "쓴 비율"로 맞춰 다른 제공자와 같은 눈금을 쓴다.
   function geminiUsageHTML(usage) {
@@ -807,11 +807,11 @@
       // PC 앱과 같은 방식: 문맥 창 한도에 가까워지면 CLI가 같은 대화 안에서 스스로 압축한다.
       const win = agent.context_window || 0;
       const used = agent.context_tokens || 0;
-      if (!win && !used) return '';
       const pct = win ? Math.min(100, Math.round((used / win) * 100)) : null;
+      const note = !win ? '다음 답변부터 창 크기와 사용률이 표시됩니다' : pct >= 80 ? '한도가 가까워 곧 자동으로 압축됩니다' : '한도에 가까워지면 PC 앱처럼 자동으로 압축됩니다';
       return `<div class="usage-popover-row">
-        <div><strong>컨텍스트 윈도우</strong><small>${pct != null && pct >= 80 ? '한도가 가까워 곧 자동으로 압축됩니다' : '한도에 가까워지면 PC 앱처럼 자동으로 압축됩니다'}</small></div>
-        <b class="${pct != null && pct >= 80 ? 'hot' : ''}">${fmtTokens(used)}${win ? ` / ${fmtTokens(win)} (${pct}%)` : ''}</b>
+        <div><strong>컨텍스트 윈도우</strong><small>${note}</small></div>
+        <b class="${pct != null && pct >= 80 ? 'hot' : ''}">${win ? `${fmtTokens(used)} / ${fmtTokens(win)} (${pct}%)` : used ? fmtTokens(used) : '—'}</b>
       </div>`;
     }
     const used = agent.context_tokens || 0;
