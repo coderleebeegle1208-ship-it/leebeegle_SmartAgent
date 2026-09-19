@@ -6,6 +6,7 @@ import path from 'node:path';
 
 // PC 클로드 앱 대화 이어받기: 목록 읽기·기록 파일 파싱은 임시 폴더에 흉내 낸 파일로 검사한다.
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-remote-desktop-'));
+process.env.AGENT_REMOTE_DB = ':memory:'; // style.js가 설정 표를 읽으므로 실제 DB를 건드리지 않게
 process.env.CLAUDE_CONFIG_DIR = path.join(home, 'claude');
 process.env.CLAUDE_DESKTOP_DIR = path.join(home, 'Claude');
 const { desktopRoot, encodeCwd, listDesktopSessions, readTranscript, transcriptPath } = await import('../server/desktop-sessions.js');

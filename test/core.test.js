@@ -22,7 +22,7 @@ const { CODEX_EFFICIENCY_CONFIG, buildCodexArgs, codexApproverConfig, codexAppro
 const { clipForTriage, claudeAddDirs, failoverContinuation, isUsageLimitError, stageEfforts, switchProvider } = await import('../server/runners/index.js');
 const { buildReviewPrompt, buildRevisionPrompt, compactConversation, formatGitManifest, otherProvider } = await import('../server/collaboration.js');
 const { parseUsage, parseCodexRateLimits } = await import('../server/usage.js');
-const { PHONE_STYLE_PROMPT, PHONE_STYLE_REMINDER, PHONE_STYLE_REMINDER_SHORT, withPhoneReminder, withPhoneReminderShort, withPhoneStyle } = await import('../server/style.js');
+const { PHONE_STYLE_PROMPT, PHONE_STYLE_REMINDER, PHONE_STYLE_REMINDER_SHORT, withPhoneReminder, withPhoneReminderShort, withPhoneStyle , setAnswerStyle, stylePrompt } = await import('../server/style.js');
 const { MIN_CAPTURE_WIDTH, resolveTarget } = await import('../server/capture.js');
 const { CODEX_MODEL_CATALOG, MODEL_CATALOG, codexDefaults, codexModelLabel, isCodexModelAllowed, isModelAllowed, modelLabel } = await import('../server/models.js');
 const { isValidRemoteUrl, parseRemote } = await import('../server/git.js');
@@ -254,7 +254,19 @@ test('review and revision prompts preserve roles and privacy-minimized Git conte
   assert.doesNotMatch(revision, /git_manifest/);
 });
 
+test('answer style: desktop tone by default — markdown allowed, no phone reminder', () => {
+  setAnswerStyle('desktop');
+  const args = buildClaudeArgs({ permission_mode: 'ask', session_id: null, model: null, effort: null }, 'agent.json', {});
+  assert.equal(args[args.indexOf('--append-system-prompt') + 1], stylePrompt());
+  assert.match(stylePrompt(), /PC 클로드 앱과 같게/);
+  assert.match(stylePrompt(), /run_job/); // 운영 규칙은 말투와 무관하게 늘 붙는다
+  assert.equal(withPhoneReminder('계속 진행'), '계속 진행');
+  assert.equal(withPhoneReminderShort('계속 진행'), '계속 진행');
+  assert.ok(withPhoneStyle('계속 진행').startsWith(stylePrompt()));
+});
+
 test('phone-friendly answer style reaches both providers', () => {
+  setAnswerStyle('phone');
   const args = buildClaudeArgs({ permission_mode: 'ask', session_id: null, model: null, effort: null }, 'agent.json', {});
   assert.equal(args[args.indexOf('--append-system-prompt') + 1], PHONE_STYLE_PROMPT);
   assert.match(PHONE_STYLE_PROMPT, /마크다운 기호/);
@@ -263,6 +275,7 @@ test('phone-friendly answer style reaches both providers', () => {
   assert.equal(withPhoneReminder('계속 진행'), `계속 진행\n\n${PHONE_STYLE_REMINDER}`);
   assert.equal(withPhoneReminderShort('계속 진행'), `계속 진행\n\n${PHONE_STYLE_REMINDER_SHORT}`);
   assert.ok(PHONE_STYLE_REMINDER_SHORT.length < PHONE_STYLE_REMINDER.length / 2);
+  setAnswerStyle('desktop');
 });
 
 test('phone tone reminder/guide only reaches turns the owner actually reads', () => {
@@ -537,6 +550,7 @@ test('plan and review turns skip global MCP config/skills and get a spend cap; n
 });
 
 test('the phone-tone system prompt only rides on turns the owner reads, not plan/review turns', () => {
+  setAnswerStyle('phone');
   const base = { permission_mode: 'ask', session_id: null, model: null, effort: null };
   assert.ok(!buildClaudeArgs(base, 'agent.json', { stage: 'plan' }).includes('--append-system-prompt'));
   assert.ok(!buildClaudeArgs(base, 'agent.json', { phase: 'review' }).includes('--append-system-prompt'));
@@ -544,6 +558,7 @@ test('the phone-tone system prompt only rides on turns the owner reads, not plan
   assert.equal(execArgs[execArgs.indexOf('--append-system-prompt') + 1], PHONE_STYLE_PROMPT);
   const manualArgs = buildClaudeArgs(base, 'agent.json', {});
   assert.equal(manualArgs[manualArgs.indexOf('--append-system-prompt') + 1], PHONE_STYLE_PROMPT);
+  setAnswerStyle('desktop');
 });
 
 test('compactAfterTokens migration: v2-capped installs rise to 150k, 0 (off) and a lower custom value stay put', () => {

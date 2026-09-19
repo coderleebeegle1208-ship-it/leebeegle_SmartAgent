@@ -18,6 +18,7 @@ import { buildDigest } from './digest.js';
 import { backupStatus, runBackup } from './backup.js';
 import { startPrompt, stopAgent, isRunning, runningIds, executePlan, switchProvider, compactAgent, enqueuePrompt, queuedPrompts, removeQueued, steerQueued, syncDesktopTranscript } from './runners/index.js';
 import { desktopRoot, listDesktopSessions, readTranscript, transcriptPath } from './desktop-sessions.js';
+import { answerStyle, setAnswerStyle } from './style.js';
 import { findClaudeBin } from './runners/claude.js';
 import { findCodexEntry } from './runners/codex.js';
 import { findGeminiEntry } from './runners/gemini.js';
@@ -158,6 +159,7 @@ api.get('/state', (req, res) => {
     models: MODEL_CATALOG,
     codex: { models: CODEX_MODEL_CATALOG, ...codexDefaults() },
     gemini: { models: geminiModelCatalog(), efforts: GEMINI_EFFORTS, ...geminiDefaults(), accounts: geminiAccounts() },
+    settings: { answer_style: answerStyle() },
     workspaces,
     agents,
     counts,
@@ -692,6 +694,16 @@ api.patch('/digest/settings', (req, res) => {
     Settings.set('digest_time', req.body.time);
   }
   res.json(digestSettings());
+});
+
+// ---------- 앱 전체 설정 ----------
+api.patch('/settings', (req, res) => {
+  try {
+    if ('answer_style' in (req.body || {})) setAnswerStyle(String(req.body.answer_style));
+    res.json({ answer_style: answerStyle() });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
 });
 
 // ---------- 자주 쓰는 지시 ----------

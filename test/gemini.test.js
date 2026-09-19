@@ -9,7 +9,7 @@ process.env.AGENT_REMOTE_CONFIG = path.join(os.tmpdir(), `agent-remote-gemini-te
 
 const { Agents, Workspaces } = await import('../server/db.js');
 const { otherProvider } = await import('../server/collaboration.js');
-const { PHONE_STYLE_PROMPT, PHONE_STYLE_REMINDER } = await import('../server/style.js');
+const { PHONE_STYLE_PROMPT, PHONE_STYLE_REMINDER, setAnswerStyle, stylePrompt } = await import('../server/style.js');
 const { geminiDefaults, geminiFallbackModel, geminiModelCatalog, geminiModelLabel, geminiSlug, isGeminiModelAllowed, modelLabel, registerGeminiModels } = await import('../server/models.js');
 const { parseAgyModels } = await import('../server/gemini-models.js');
 const { buildGeminiArgs, createGeminiEventHandler, geminiEnv, geminiHomeFiles, geminiStyledText, geminiThinkingLevel } = await import('../server/runners/gemini.js');
@@ -127,9 +127,13 @@ test('Gemini env: per-agent home, no API key or SSH marker leaking in', () => {
 });
 
 test('Gemini styled text: full guide on first turn, reminder on resume, nothing for plan/review', () => {
+  setAnswerStyle('phone');
   assert.ok(geminiStyledText('x', { session_id: null }).startsWith(PHONE_STYLE_PROMPT));
   assert.ok(geminiStyledText('x', { session_id: 's' }).endsWith(PHONE_STYLE_REMINDER));
   assert.equal(geminiStyledText('x', { session_id: null }, { stage: 'plan' }), 'x');
+  setAnswerStyle('desktop');
+  assert.ok(geminiStyledText('x', { session_id: null }).startsWith(stylePrompt()));
+  assert.ok(geminiStyledText('x', { session_id: 's' }).endsWith('x')); // PC 앱 말투는 되새김 문구가 없다
 });
 
 test('Antigravity stream-json → hooks: text deltas merge per step, tools shown, result carries usage', () => {

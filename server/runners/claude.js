@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import readline from 'node:readline';
 import { DATA_DIR, SERVER_DIR } from '../paths.js';
-import { PHONE_STYLE_PROMPT, withPhoneReminderShort } from '../style.js';
+import { stylePrompt, withPhoneReminderShort } from '../style.js';
 import { normalizeClaudeUsage } from '../tokens.js';
 
 export function findClaudeBin() {
@@ -322,7 +322,7 @@ export function buildClaudeArgs(agent, mcpPath, opts = {}) {
   // Plan output goes to ExitPlanMode (read by the executor turn, not the owner) and review output
   // goes to the other model, so neither needs the phone-tone guide — skipping it there also keeps
   // it from being re-sent as part of the plan/review text that later turns carry along.
-  if (!isPlanOrReview) args.push('--append-system-prompt', PHONE_STYLE_PROMPT);
+  if (!isPlanOrReview) args.push('--append-system-prompt', stylePrompt());
   if (agent.session_id) args.push('--resume', agent.session_id);
   // Plan and cross-review turns start a fresh session every time, so they pay the full system
   // prompt + tool + skill definitions from zero; skills add nothing when the turn can't edit anyway.

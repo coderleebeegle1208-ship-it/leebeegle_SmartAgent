@@ -1068,3 +1068,73 @@ dialog.sheet { position: fixed; inset: auto 0 0 0; margin: 0 auto; width: min(10
   font-size: 13.5px;
 }
 
+
+/* ===== PC 클로드 앱과 같은 색·글꼴 (대표 요청 2026-09-20) =====
+   바탕 #151515, 글 #F0EFEC, 보조 회색, 링크 파랑 #679DDD, 인라인 코드는 어두운 칩에 붉은 글자.
+   답변은 말풍선 없이 본문처럼, 내 말은 회색 상자. 글자는 한 단계 작게. */
+:root {
+  --bg: #151515;
+  --surface: #1C1C1C;
+  --surface-2: #262626;
+  --raised: #222222;
+  --line: rgba(255,255,255,.08);
+  --line-strong: rgba(255,255,255,.16);
+  --ink: #F0EFEC;
+  --ink-2: #CBCBC8;
+  --ink-3: #9B9A98;
+  --ink-4: #6E6D6B;
+  --ink-inv: #151515;
+  --accent: #D97757;
+  --accent-ink: #E8A48C;
+  --accent-bg: rgba(217,119,87,.14);
+  --accent-bg-2: rgba(217,119,87,.24);
+  --accent-line: rgba(217,119,87,.4);
+  --blue: #679DDD;
+  --warn: #679DDD; --warn-ink: #8DB6E8; --warn-bg: rgba(103,157,221,.12);
+  --gemini: #679DDD; --gemini-ink: #8DB6E8; --gemini-bg: rgba(103,157,221,.14);
+  --glass: rgba(255,255,255,.035); --glass-2: rgba(255,255,255,.06); --bar: rgba(21,21,21,.86);
+  --code-bg: #292929; --code-ink: #DD7777; --link: #679DDD;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Pretendard", "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+html, body { font-size: 13px; line-height: 1.6; }
+body::before { background: var(--bg); }
+.glass { box-shadow: none; }
+
+/* 대화 본문 */
+.stream { gap: 8px; }
+.msg { font-size: 13.5px; line-height: 1.65; }
+.msg.user { max-width: 88%; background: var(--surface-2); color: var(--ink); border: 1px solid var(--line-strong); border-radius: 12px; padding: 8px 12px; box-shadow: none; font-size: 13.5px; }
+.msg.user .time { color: var(--ink-4); }
+.msg.user .msg-skill { background: rgba(255,255,255,.1); color: var(--ink-2); }
+.msg.assistant { max-width: 100%; padding: 2px 2px 2px 0; border: 0; border-left: 0; border-radius: 0; background: transparent; color: var(--ink); }
+.msg.assistant b { color: var(--ink); font-weight: 700; }
+.msg.assistant b.h, .msg.plan b.h { font-size: 14px; color: var(--ink); margin: 10px 0 3px; }
+.msg.assistant code, .msg.plan code { font-size: 12px; padding: 1px 5px; border-radius: 4px; background: var(--code-bg); color: var(--code-ink); }
+.msg.assistant .code, .msg.plan .code { background: #1A1A1A; color: #E5E4E1; border: 1px solid var(--line-strong); border-radius: 8px; font-size: 12px; max-height: 260px; }
+.msg.assistant .li, .msg.plan .li { padding-left: calc(16px + var(--d, 0) * 16px); }
+.msg.assistant .li::before, .msg.plan .li::before { left: calc(3px + var(--d, 0) * 16px); top: .72em; width: 5px; height: 5px; background: var(--ink-2); }
+.msg.assistant .li.num::before, .msg.plan .li.num::before { display: none; }
+.msg.assistant .li.num i, .msg.plan .li.num i { position: absolute; left: calc(var(--d, 0) * 16px); font-style: normal; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.msg.assistant a, .msg.plan a, .msg.user a { color: var(--link); text-decoration: none; word-break: break-all; }
+.msg.assistant a:hover, .msg.plan a:hover { text-decoration: underline; }
+.msg.assistant hr, .msg.plan hr { border: 0; border-top: 1px solid var(--line-strong); margin: 8px 0; }
+.msg-source { margin: 0 0 4px; padding: 2px 8px 2px 4px; font-size: 9.5px; letter-spacing: .06em; background: transparent; color: var(--ink-3); }
+.msg-source::before { width: 12px; height: 12px; box-shadow: none; }
+.msg.assistant .time { margin-top: 4px; }
+.msg .time { font-size: 10.5px; color: var(--ink-4); }
+.msg.tool { font-size: 12px; color: var(--ink-3); }
+.msg.tool b { color: var(--ink-4); }
+.msg.tool_result { font-size: 11.5px; color: var(--ink-3); background: var(--surface); }
+.msg.system { font-size: 12px; }
+.msg.plan { font-size: 13.5px; }
+.msg.usage { font-size: 11.5px; }
+.day { font-size: 10.5px; }
+.activity { background: transparent; }
+.activity summary { font-size: 12px; }
+.progress { background: var(--surface); }
+.composer { background: var(--bar); }
+.composer textarea { background: var(--surface-2); border-color: var(--line-strong); }
+
+/* 설정 화면의 고르기 상자 */
+.settings-select { height: 34px; flex: 0 0 auto; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--ink); font-size: 13px; font-family: inherit; }

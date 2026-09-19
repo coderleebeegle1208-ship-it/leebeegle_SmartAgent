@@ -9,15 +9,22 @@
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   // Minimal markdown for model replies: fenced/inline code, **bold**, and "# heading" lines.
   // Everything else stays plain text so the phone view never shows stray symbols.
+  // 답변 마크다운. "PC 앱처럼" 스타일이면 **굵게**는 그냥 굵게, 폰용이면 빨간 강조(주의·확인 사항)로 그린다.
   const rich = (text) => {
+    const phone = state.data?.settings?.answer_style === 'phone';
+    const depthOf = (sp) => Math.min(3, Math.floor(sp.length / 2));
     const parts = String(text ?? '').split(/(```[\s\S]*?```)/);
     return parts.map((part, i) => {
       if (i % 2) return `<pre class="code">${esc(part.replace(/^```[^\n]*\n?/, '').replace(/```$/, ''))}</pre>`;
       return esc(part)
         .replace(/^#{1,6}\s+(.+)$/gm, '<b class="h">$1</b>')
-        .replace(/\*\*([^*\n]+)\*\*/g, '<b class="hot">$1</b>')
+        .replace(/\*\*([^*\n]+)\*\*/g, phone ? '<b class="hot">$1</b>' : '<b>$1</b>')
         .replace(/`([^`\n]+)`/g, '<code>$1</code>')
-        .replace(/^[-•]\s+(.+)$/gm, '<span class="li">$1</span>');
+        .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+        .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/gm, '$1<a href="$2" target="_blank" rel="noopener">$2</a>')
+        .replace(/^( *)(\d+)[.)]\s+(.+)$/gm, (m, sp, n, t) => `<span class="li num" style="--d:${depthOf(sp)}"><i>${n}.</i>${t}</span>`)
+        .replace(/^( *)[-•*]\s+(.+)$/gm, (m, sp, t) => `<span class="li" style="--d:${depthOf(sp)}">${t}</span>`)
+        .replace(/^ *(?:---|\*\*\*)\s*$/gm, '<hr>');
     }).join('');
   };
   // Token-usage card formatting (mirrors server/tokens.js so both sides agree on shape).
