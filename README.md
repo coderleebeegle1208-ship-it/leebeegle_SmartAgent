@@ -137,7 +137,6 @@ powershell -ExecutionPolicy Bypass -File scripts\register-autostart.ps1
 - 절전 끄기 (전원 연결 시): `powercfg /change standby-timeout-ac 0`
 - Tailscale serve 설정은 재부팅 후에도 유지됩니다. 해제: `tailscale serve --https=443 off`
 
-이 PC의 주소: `https://leebeegle.tailb35555.ts.net` (Tailscale에 로그인된 기기에서만 열림)
 
 ## 구조
 
