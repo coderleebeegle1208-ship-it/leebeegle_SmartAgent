@@ -130,7 +130,7 @@ npm test
 powershell -ExecutionPolicy Bypass -File scripts\register-autostart.ps1
 ```
 
-  등록되는 작업 이름은 `leebeegle_SmartAgent`이고, Claude나 터미널과 무관하게 로그인만 하면 서버가 뜹니다. 서버가 죽으면 1분 간격으로 3번까지 자동 재시작합니다.
+  등록되는 작업 이름은 `leebeegle_SmartAgent`이고, Claude나 터미널과 무관하게 로그인만 하면 서버가 뜹니다. 로그인 때와 그 뒤 5분마다 `scripts\ensure-running.ps1`이 돌면서 서버나 Tailscale 트레이 앱이 꺼져 있으면 다시 켭니다(서버가 죽었거나, 다시 시작이 실패해 앱만 모두 닫힌 경우도 포함).
   해제: `powershell -ExecutionPolicy Bypass -File scripts\unregister-autostart.ps1`
   폴더 이름이나 위치를 바꾸면 등록 명령을 한 번 더 실행해야 새 경로를 가리킵니다.
 - 서버 재시작: `powershell -ExecutionPolicy Bypass -File scripts\restart-server.ps1`. 폰에서 에이전트에게 "서버 재시작해줘"라고 하면 에이전트가 전용 도구(`restart_server`)로 예약하고, 진행 중인 답변이 끝난 뒤 5초 안에 다시 켜집니다. 에이전트가 프로세스를 직접 죽이면 폰 연결이 끊기므로 지침으로 금지해 두었습니다.
